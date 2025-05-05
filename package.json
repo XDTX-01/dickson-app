@@ -1,0 +1,23 @@
+{
+  "name": "dickson-color-studio",
+  "version": "1.0.0",
+  "description": "Little Deng Student",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "package": "electron-builder --win --x64"
+  },
+  "author": "Little Deng Student",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^23.3.13",
+    "electron-builder": "^23.6.0"
+  },
+  "build": {
+    "appId": "com.example.dickson",
+    "win": {
+      "icon": "src/icon.ico"
+    }
+  },
+  "keywords": []
+}
