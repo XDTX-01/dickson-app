@@ -7,30 +7,55 @@ const {
   dialog,
 } = require("electron");
 const path = require("path");
-const { exec } = require("child_process");
 const os = require("os");
-const fs = require("fs");
+const fs = require("fs/promises"); // 使用Promise版本的fs
 
-const packageJsonPath = path.join(__dirname, "package.json");
-const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-const appVersion = packageJson.version;
+// ------------------------- 常量与配置 -------------------------
+const CONSTANTS = {
+  APP_ICON: path.join(__dirname, "src/icon.ico"),
+  INDEX_HTML: path.join(__dirname, "src/index.html"),
+  PRELOAD_SCRIPT: path.join(__dirname, "src/preload.js"),
+  NETWORK_TARGET: "www.baidu.com",
+  SHORTCUTS: {
+    REFRESH: "Ctrl+R",
+    DEV_TOOLS: "F12",
+    ZOOM_IN: "Ctrl+Plus",
+    ZOOM_OUT: "Ctrl+Minus",
+    ZOOM_RESET: "Ctrl+0",
+  },
+  ZOOM_LIMITS: { MIN: 0.5, MAX: 2.0 }, // 缩放限制
+  CONFIG: {
+    EXPIRE_DATE: new Date("2025-12-31"),
+    SELF_DESTRUCT: true,
+  },
+};
 
-function getNetworkLatency(callback) {
-  const target = "www.baidu.com";
-  exec(`ping -n 1 ${target}`, (error, stdout, stderr) => {
-    if (error) {
-      callback("无法获取");
-      return;
-    }
-    const match = stdout.match(/平均 = (\d+)ms/);
-    if (match) {
-      callback(match[1] + "ms");
-    } else {
-      callback("无法获取");
-    }
-  });
+// ------------------------- 工具函数 -------------------------
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
 }
 
+// ------------------------- 核心功能 -------------------------
+// 单实例锁
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) app.quit();
+
+// 获取应用版本（Promise化）
+async function getAppVersion() {
+  try {
+    const data = await fs.readFile(
+      path.join(__dirname, "package.json"),
+      "utf8"
+    );
+    const packageJson = JSON.parse(data);
+    return packageJson.version;
+  } catch (err) {
+    console.error("读取版本失败:", err);
+    return "未知版本";
+  }
+}
+
+// 获取网络状态
 function getNetworkStatus() {
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
@@ -43,28 +68,49 @@ function getNetworkStatus() {
       }
     }
   }
-  return {
-    status: "未连接",
-    ip: "无",
-  };
+  return { status: "未连接", ip: "无" };
 }
 
+// ------------------------- 窗口管理 -------------------------
 function createWindow() {
-  if (checkExpiration()) return;
-
   const win = new BrowserWindow({
     width: 800,
     height: 600,
-    icon: path.join(__dirname, "src/icon.ico"),
-    webPreferences: {
-      preload: path.join(__dirname, "src/preload.js"),
-    },
+    icon: CONSTANTS.APP_ICON,
+    webPreferences: { preload: CONSTANTS.PRELOAD_SCRIPT },
   });
 
-  win.loadFile("src/index.html");
+  win.loadFile(CONSTANTS.INDEX_HTML);
 
-  const networkInfo = getNetworkStatus();
-  getNetworkLatency((latency) => {
+  // 注册快捷键并绑定窗口销毁时注销
+  function registerShortcuts() {
+    globalShortcut.register(CONSTANTS.SHORTCUTS.REFRESH, () => win.reload());
+    globalShortcut.register(CONSTANTS.SHORTCUTS.DEV_TOOLS, () =>
+      win.webContents.openDevTools()
+    );
+  }
+  registerShortcuts();
+  win.on("closed", () => globalShortcut.unregisterAll()); // 防止内存泄漏
+
+  // 优化后的缩放逻辑（带限制）
+  function handleZoom(delta = 0.1) {
+    const current = win.webContents.getZoomFactor();
+    win.webContents.setZoomFactor(
+      clamp(
+        current + delta,
+        CONSTANTS.ZOOM_LIMITS.MIN,
+        CONSTANTS.ZOOM_LIMITS.MAX
+      )
+    );
+  }
+
+  // 菜单更新（Promise化）
+  async function updateMenu() {
+    const [networkInfo, appVersion] = await Promise.all([
+      Promise.resolve(getNetworkStatus()),
+      getAppVersion(),
+    ]);
+
     const template = [
       {
         label: "文件",
@@ -72,9 +118,7 @@ function createWindow() {
           {
             label: "退出",
             accelerator: "Ctrl+Q",
-            click: () => {
-              app.quit();
-            },
+            click: () => app.quit(),
           },
         ],
       },
@@ -83,182 +127,143 @@ function createWindow() {
         submenu: [
           {
             label: "刷新",
-            accelerator: "Ctrl+R",
-            click: () => {
-              win.reload();
-            },
+            accelerator: CONSTANTS.SHORTCUTS.REFRESH,
+            click: () => win.reload(),
           },
           {
             label: "开发者工具",
-            accelerator: "F12",
-            click: () => {
-              win.webContents.openDevTools();
-            },
+            accelerator: CONSTANTS.SHORTCUTS.DEV_TOOLS,
+            click: () => win.webContents.openDevTools(),
           },
           {
             label: "放大",
-            accelerator: "Ctrl+Plus",
-            click: () => {
-              win.webContents.setZoomFactor(
-                win.webContents.getZoomFactor() + 0.1
-              );
-            },
+            accelerator: "Ctrl+=",
+            click: () => handleZoom(0.1),
           },
           {
             label: "缩小",
-            accelerator: "Ctrl+Minus",
-            click: () => {
-              win.webContents.setZoomFactor(
-                win.webContents.getZoomFactor() - 0.1
-              );
-            },
+            accelerator: "Ctrl+-",
+            click: () => handleZoom(-0.1),
           },
           {
             label: "重置缩放",
-            accelerator: "Ctrl+0",
-            click: () => {
-              win.webContents.setZoomFactor(1);
-            },
+            accelerator: CONSTANTS.SHORTCUTS.ZOOM_RESET,
+            click: () => win.webContents.setZoomFactor(1),
           },
         ],
       },
       {
-        label: `网络状态: ${networkInfo.status}，本机 IP: ${networkInfo.ip}，网络延迟: ${latency}`,
+        label: `网络状态: ${networkInfo.status}，本机 IP: ${networkInfo.ip}`,
+        enabled: false,
+      },
+      { label: `Version: ${appVersion}`, enabled: false },
+      {
+        label: `${getRemainingTime()} `,
         enabled: false,
       },
       {
         label: "关于",
         submenu: [
           {
-            label: "Click to Check for Updates",
+            label: "检查更新",
             click: () => {
-              shell.openExternal(
-                "https://pan.baidu.com/s/1C1--k3ibElRIPEso1XGKEQ?pwd=53w2"
-              );
+              const url =
+                "https://wwix.lanzouw.com/b011la44be";
+              if (/^https?:\/\//i.test(url)) shell.openExternal(url);
             },
           },
           {
-            label: "Copyright: Little Deng Student",
-            click: () => {
-              console.log("Copyright: Little Deng Student");
-            },
-          },
-          {
-            label: `Time: ${getRemainingTime()}`,
-            enabled: false,
+            label: "版权信息",
+            click: () => console.log("Copyright: Little Deng Student"),
           },
         ],
       },
-      {
-        label: `版本: ${appVersion}`,
-        enabled: false,
-      },
     ];
 
-    const menu = Menu.buildFromTemplate(template);
-    Menu.setApplicationMenu(menu);
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
 
-    setInterval(() => {
-      const newNetworkInfo = getNetworkStatus();
-      getNetworkLatency((newLatency) => {
-        template[2].label = `网络状态: ${newNetworkInfo.status}，本机 IP: ${newNetworkInfo.ip}，网络延迟: ${newLatency}`;
-        template[3].submenu[2].label = `Time: ${getRemainingTime()}`;
-        const newMenu = Menu.buildFromTemplate(template);
-        Menu.setApplicationMenu(newMenu);
-      });
-    }, 5000);
-  });
+  // 初始化及定时更新
+  updateMenu();
+  setInterval(updateMenu, 5000);
 
-  globalShortcut.register("Ctrl+R", () => {
-    win.reload();
-  });
-
-  globalShortcut.register("F12", () => {
-    win.webContents.openDevTools();
-  });
-
+  // 键盘缩放支持（优化事件处理）
   win.webContents.on("before-input-event", (event, input) => {
-    if (input.control && input.type === "keyDown") {
-      if (input.key === "Minus") {
-        win.webContents.setZoomFactor(win.webContents.getZoomFactor() - 0.1);
-      } else if (input.key === "Equal") {
-        win.webContents.setZoomFactor(win.webContents.getZoomFactor() + 0.1);
-      }
+    if (input.ctrlKey && input.type === "keyDown") {
+      if (input.key === "Minus") handleZoom(-0.1);
+      else if (input.key === "Equal") handleZoom(0.1);
     }
   });
 
-  win.webContents.on("mouse-wheel", (event, deltaX, deltaY) => {
+  // 鼠标滚轮缩放（带Ctrl键检测）
+  win.webContents.on("mouse-wheel", (event, _, deltaY) => {
     if (event.ctrlKey) {
       event.preventDefault();
-      const zoomFactor = win.webContents.getZoomFactor();
-      const newZoomFactor = deltaY > 0 ? zoomFactor + 0.1 : zoomFactor - 0.1;
-      win.webContents.setZoomFactor(newZoomFactor);
+      handleZoom(deltaY > 0 ? 0.1 : -0.1);
     }
   });
+
+  return win; // 返回窗口引用以便后续操作
 }
 
-app.whenReady().then(() => {
-  createWindow();
+// ------------------------- 过期与自毁逻辑 -------------------------
+function getRemainingTime() {
+  const now = new Date();
+  const remainingMs = CONSTANTS.CONFIG.EXPIRE_DATE - now;
+  if (remainingMs <= 0) return 0; // 已到期，返回0分钟
 
-  app.on("activate", function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
+  return Math.floor(remainingMs / 60000); // 转换为分钟并取整
+}
 
-app.on("window-all-closed", function () {
-  if (process.platform !== "darwin") app.quit();
-});
-
-const CONFIG = {
-  EXPIRE_DATE: new Date("2025-12-31"),
-  SELF_DESTRUCT: true,
-};
-
-function selfDestruct() {
-  if (!CONFIG.SELF_DESTRUCT) return;
+async function selfDestruct() {
+  if (!CONSTANTS.CONFIG.SELF_DESTRUCT) return;
 
   try {
     const appPath = path.dirname(app.getPath("exe"));
+    const tempDir = os.tmpdir();
     const isWindows = process.platform === "win32";
+    const isMac = process.platform === "darwin";
 
-    const batFile = path.join(os.tmpdir(), "cleanup.bat");
-    const shFile = path.join(os.tmpdir(), "cleanup.sh");
+    // 生成临时脚本
+    const scriptPath = isWindows
+      ? path.join(tempDir, "cleanup.bat")
+      : path.join(tempDir, isMac ? "cleanup.command" : "cleanup.sh");
 
+    const scriptContent = isWindows
+      ? `@echo off\n timeout /t 3 /nobreak >nul\n rmdir /s /q "${appPath}"\n del "${scriptPath}"`
+      : isMac
+      ? `#!/bin/bash\n sleep 3\n rm -rf "${appPath}"\n rm -- "$0"`
+      : `#!/bin/bash\n sleep 3\n rm -rf "${appPath}"\n rm -- "$0"`;
+
+    await fs.writeFile(scriptPath, scriptContent);
+    if (!isWindows) await fs.chmod(scriptPath, 0o755); // 添加执行权限
+
+    // 执行脚本
     if (isWindows) {
-      fs.writeFileSync(
-        batFile,
-        `
-        @echo off
-        timeout /t 3 /nobreak >nul
-        rmdir /s /q "${appPath}"
-        del "${batFile}"
-      `
-      );
-      exec(`start cmd /c "${batFile}"`, { shell: true });
+      require("child_process").exec(`start cmd /c "${scriptPath}"`, {
+        shell: true,
+      });
+    } else if (isMac) {
+      require("child_process").exec(`open -a Terminal "${scriptPath}"`, {
+        shell: true,
+      }); // macOS使用Terminal执行
     } else {
-      fs.writeFileSync(
-        shFile,
-        `
-        #!/bin/bash
-        sleep 3
-        rm -rf "${appPath}"
-        rm -- "$0"
-      `
-      );
-      fs.chmodSync(shFile, 0o755);
-      exec(`xterm -e "bash ${shFile}"`);
+      require("child_process").exec(`xterm -e "bash ${scriptPath}"`, {
+        shell: true,
+      }); // Linux终端执行
     }
   } catch (error) {
     console.error("自毁失败:", error);
+    await dialog.showErrorBox("自毁失败", "删除应用程序时发生错误，请手动删除");
   }
 }
 
 function checkExpiration() {
   const now = new Date();
-  if (now > CONFIG.EXPIRE_DATE) {
+  if (now > CONSTANTS.CONFIG.EXPIRE_DATE) {
     dialog.showErrorBox(
-      "Application has expired",
-      "This program has exceeded the valid period and will self-destruct shortly!\n\n"
+      "应用过期",
+      "程序已超过有效期，即将自毁！\n\n剩余时间：0分钟"
     );
     selfDestruct();
     app.quit();
@@ -267,17 +272,25 @@ function checkExpiration() {
   return false;
 }
 
-function getRemainingTime() {
-  const now = new Date();
-  const remainingMs = CONFIG.EXPIRE_DATE - now;
-  if (remainingMs <= 0) {
-    return "已到期";
-  }
-  const days = Math.floor(remainingMs / (1000 * 60 * 60 * 24));
-  const hours = Math.floor(
-    (remainingMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
-  );
-  const minutes = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
-  const seconds = Math.floor((remainingMs % (1000 * 60)) / 1000);
-  return `${days} 天 ${hours} 时 ${minutes} 分 ${seconds} 秒`;
-}
+// ------------------------- 应用生命周期 -------------------------
+app.whenReady().then(() => {
+  if (checkExpiration()) return;
+  const mainWindow = createWindow();
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+
+  // 处理第二个实例启动
+  app.on("second-instance", (_, __, ___) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      win.isMinimized() ? win.restore() : null;
+      win.focus();
+    }
+  });
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit(); // 非macOS完全退出
+});
