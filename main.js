@@ -168,7 +168,7 @@ function createWindow() {
             label: "检查更新",
             click: () => {
               const url =
-                "https://wwix.lanzouw.com/b011la44be";
+                "https://pan.quark.cn/s/63920dd32971";
               if (/^https?:\/\//i.test(url)) shell.openExternal(url);
             },
           },
