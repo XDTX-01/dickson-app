@@ -2,10 +2,9 @@ const {
   app,
   BrowserWindow,
   Menu,
-  globalShortcut,
-  shell,
   dialog,
 } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const os = require("os");
 const fs = require("fs/promises"); // 使用Promise版本的fs
@@ -15,17 +14,14 @@ const CONSTANTS = {
   APP_ICON: path.join(__dirname, "src/icon.ico"),
   INDEX_HTML: path.join(__dirname, "src/index.html"),
   PRELOAD_SCRIPT: path.join(__dirname, "src/preload.js"),
-  NETWORK_TARGET: "www.baidu.com",
   SHORTCUTS: {
     REFRESH: "Ctrl+R",
     DEV_TOOLS: "F12",
-    ZOOM_IN: "Ctrl+Plus",
-    ZOOM_OUT: "Ctrl+Minus",
     ZOOM_RESET: "Ctrl+0",
   },
   ZOOM_LIMITS: { MIN: 0.5, MAX: 2.0 }, // 缩放限制
   CONFIG: {
-    EXPIRE_DATE: new Date("2025-12-31"),
+    EXPIRE_DATE: new Date("2026-12-31"),
     SELF_DESTRUCT: true,
   },
 };
@@ -38,7 +34,10 @@ function clamp(value, min, max) {
 // ------------------------- 核心功能 -------------------------
 // 单实例锁
 const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) app.quit();
+if (!gotTheLock) {
+  app.quit();
+  return; // 未拿到锁立即终止，避免继续注册窗口与事件
+}
 
 // 获取应用版本（Promise化）
 async function getAppVersion() {
@@ -77,20 +76,18 @@ function createWindow() {
     width: 800,
     height: 600,
     icon: CONSTANTS.APP_ICON,
-    webPreferences: { preload: CONSTANTS.PRELOAD_SCRIPT },
+    webPreferences: {
+      preload: CONSTANTS.PRELOAD_SCRIPT,
+      contextIsolation: true, // 渲染进程与 preload 隔离，防止页面直接触碰 Node
+      nodeIntegration: false, // 禁止页面使用 Node API
+      sandbox: true, // 启用渲染进程沙箱
+    },
   });
 
   win.loadFile(CONSTANTS.INDEX_HTML);
 
-  // 注册快捷键并绑定窗口销毁时注销
-  function registerShortcuts() {
-    globalShortcut.register(CONSTANTS.SHORTCUTS.REFRESH, () => win.reload());
-    globalShortcut.register(CONSTANTS.SHORTCUTS.DEV_TOOLS, () =>
-      win.webContents.openDevTools()
-    );
-  }
-  registerShortcuts();
-  win.on("closed", () => globalShortcut.unregisterAll()); // 防止内存泄漏
+  // 快捷键统一由下方应用菜单的 accelerator 提供（仅在本应用内生效），
+  // 不再使用 globalShortcut，避免拦截系统及其他应用的全局按键。
 
   // 优化后的缩放逻辑（带限制）
   function handleZoom(delta = 0.1) {
@@ -162,38 +159,17 @@ function createWindow() {
         enabled: false,
       },
       {
-        label: "关于",
-        submenu: [
-          {
-            label: "检查更新",
-            click: () => {
-              const url =
-                "https://pan.quark.cn/s/63920dd32971";
-              if (/^https?:\/\//i.test(url)) shell.openExternal(url);
-            },
-          },
-          {
-            label: "版权信息",
-            click: () => console.log("Copyright: Little Deng Student"),
-          },
-        ],
+        label: "检查更新",
+        click: () => checkForUpdates(),
       },
     ];
 
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
-  // 初始化及定时更新
+  // 初始化及定时更新（倒计时需周期性刷新）
   updateMenu();
   setInterval(updateMenu, 5000);
-
-  // 键盘缩放支持（优化事件处理）
-  win.webContents.on("before-input-event", (event, input) => {
-    if (input.ctrlKey && input.type === "keyDown") {
-      if (input.key === "Minus") handleZoom(-0.1);
-      else if (input.key === "Equal") handleZoom(0.1);
-    }
-  });
 
   // 鼠标滚轮缩放（带Ctrl键检测）
   win.webContents.on("mouse-wheel", (event, _, deltaY) => {
@@ -204,6 +180,58 @@ function createWindow() {
   });
 
   return win; // 返回窗口引用以便后续操作
+}
+
+// ------------------------- 自动更新（electron-updater） -------------------------
+let updateCheckInProgress = false;
+
+function initAutoUpdater() {
+  autoUpdater.logger = console;
+  autoUpdater.autoDownload = true; // 检测到更新自动下载
+  autoUpdater.autoInstallOnAppQuit = true; // 退出时自动安装
+
+  autoUpdater.on("checking-for-update", () => {
+    dialog.showMessageBox({ type: "info", title: "检查更新", message: "正在检查更新，请稍候..." });
+  });
+  autoUpdater.on("update-available", (info) => {
+    dialog.showMessageBox({
+      type: "info",
+      title: "检查更新",
+      message: `发现新版本 v${info.version}，正在后台下载，完成后会提示安装。`,
+    });
+  });
+  autoUpdater.on("update-not-available", () => {
+    dialog.showMessageBox({ type: "info", title: "检查更新", message: "当前已是最新版本，无需更新。" });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    dialog
+      .showMessageBox({
+        type: "question",
+        title: "更新就绪",
+        message: `新版本 v${info.version} 已下载完成，是否立即重启安装？`,
+        buttons: ["立即重启安装", "稍后"],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then((res) => {
+        if (res.response === 0) autoUpdater.quitAndInstall();
+      });
+  });
+  autoUpdater.on("error", (err) => {
+    updateCheckInProgress = false;
+    dialog.showErrorBox("更新失败", `检查更新时出错：${err && err.message ? err.message : err}`);
+  });
+}
+
+function checkForUpdates() {
+  if (updateCheckInProgress) return;
+  updateCheckInProgress = true;
+  autoUpdater
+    .checkForUpdates()
+    .catch(() => {})
+    .finally(() => {
+      updateCheckInProgress = false;
+    });
 }
 
 // ------------------------- 过期与自毁逻辑 -------------------------
@@ -275,6 +303,7 @@ function checkExpiration() {
 // ------------------------- 应用生命周期 -------------------------
 app.whenReady().then(() => {
   if (checkExpiration()) return;
+  initAutoUpdater();
   const mainWindow = createWindow();
 
   app.on("activate", () => {
