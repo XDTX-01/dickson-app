@@ -1,11 +1,11 @@
 {
   "name": "dickson-color-studio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Little Deng Student",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "package": "electron-builder --win --x64"
+    "package": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && electron-builder --win --x64"
   },
   "author": "Little Deng Student",
   "license": "MIT",
@@ -15,9 +15,38 @@
   },
   "build": {
     "appId": "com.example.dickson",
+    "productName": "dickson-color-studio",
     "win": {
-      "icon": "src/icon.ico"
-    }
+      "icon": "src/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "dickson-color-studio"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "XDTX-01",
+        "repo": "dickson-app"
+      }
+    ]
   },
-  "keywords": []
+  "keywords": [],
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
 }
