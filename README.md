@@ -43,13 +43,3 @@ npm run package
 > ⚠️ 关键：
 > - `latest.yml` 必须上传，否则客户端点"检查更新"检测不到新版。
 > - 每次发版用**新生成的** `latest.yml`，版本号只增不减。
-
-## 五、自动发布（可选，免手动上传）
-
-把 GitHub 令牌（`ghp_` 或 `github_pat_` 开头）保存到项目根目录的 `token.txt`，然后：
-
-```
-node release.js
-```
-
-`release.js` 会自动：读取 `token.txt` → 版本号 +1 → 打包 → 上传到 GitHub Releases。
