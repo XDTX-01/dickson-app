@@ -32,7 +32,6 @@
       "oneClick": true,
       "perMachine": false,
       "allowElevation": true,
-      "allowDowngrades": false,
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
