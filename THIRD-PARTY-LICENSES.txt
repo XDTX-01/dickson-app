@@ -1,0 +1,69 @@
+THIRD-PARTY SOFTWARE NOTICES
+=============================
+
+本文件列明 dickson-color-studio 中打包引入的主要第三方开源软件及其
+版权与许可声明，作为对外分发时保留版权声明的书面记录。
+（本项目自身代码采用 MIT License。）
+
+The following third-party software and libraries are included in this
+distribution. Their copyright notices and MIT license terms are reproduced
+below.
+
+
+1. Vue.js
+---------
+Copyright (c) 2014-2022 Evan You
+License: MIT
+
+2. Element UI
+-------------
+Copyright (c) 2016-2018 ElemeFE (https://element.eleme.io)
+License: MIT
+
+3. lodash
+---------
+Copyright JS Foundation and other contributors
+https://js.foundation/ | https://lodash.com/license
+License: MIT
+
+4. underscore
+-------------
+Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+License: MIT
+
+5. mathjs
+---------
+Copyright (c) 2013-2022, Jos de Jong
+License: Apache License 2.0 / MIT (以实际打包为准)
+
+6. core-js
+----------
+Copyright (c) 2014-2022 Denis Pushkarev (zloirock.ru)
+License: MIT
+
+
+MIT License (通用许可声明，适用于以上 MIT 许可的各依赖)
+---------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+注：
+- 前端为 webpack 构建产物，部分依赖（Element UI 等）的版权 banner 在
+  打包时被剥离，本文件即为合规的书面补充记录。
