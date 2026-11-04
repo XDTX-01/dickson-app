@@ -182,8 +182,41 @@ function createWindow() {
   return win; // 返回窗口引用以便后续操作
 }
 
-// ------------------------- 自动更新（electron-updater） -------------------------
+// ------------------------- 自动更新（electron-updater，多更新源取最高版本） -------------------------
 let updateCheckInProgress = false;
+let isProbing = false; // 是否处于"探测各源版本"阶段（此时不弹窗、不下载）
+
+// 更新源列表：GitHub 与 腾讯云 COS 都会检查，软件自动选"最新版本更高"的那个源下载。
+const UPDATE_SOURCES = [
+  {
+    provider: "github",
+    owner: "XDTX-01",
+    repo: "dickson-app",
+  },
+  {
+    provider: "generic",
+    url: "https://dickson-app-1313952720.cos-website.ap-guangzhou.myqcloud.com/app-update/",
+    channel: "latest",
+  },
+];
+
+function applyFeedURL(source) {
+  autoUpdater.setFeedURL(source);
+}
+
+// 简单版本号比较：a>b 返回1，a<b 返回-1，相等返回0（支持 1.0.4 / 1.0.5 等）
+function compareVersions(a, b) {
+  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
+}
 
 function initAutoUpdater() {
   autoUpdater.logger = console;
@@ -191,9 +224,12 @@ function initAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true; // 退出时自动安装
 
   autoUpdater.on("checking-for-update", () => {
+    if (isProbing) return; // 探测阶段不弹窗
     dialog.showMessageBox({ type: "info", title: "检查更新", message: "正在检查更新，请稍候..." });
   });
   autoUpdater.on("update-available", (info) => {
+    if (isProbing) return; // 探测阶段不弹窗
+    updateCheckInProgress = false;
     dialog.showMessageBox({
       type: "info",
       title: "检查更新",
@@ -201,6 +237,8 @@ function initAutoUpdater() {
     });
   });
   autoUpdater.on("update-not-available", () => {
+    if (isProbing) return; // 探测阶段不弹窗
+    updateCheckInProgress = false;
     dialog.showMessageBox({ type: "info", title: "检查更新", message: "当前已是最新版本，无需更新。" });
   });
   autoUpdater.on("update-downloaded", (info) => {
@@ -217,21 +255,60 @@ function initAutoUpdater() {
         if (res.response === 0) autoUpdater.quitAndInstall();
       });
   });
+
   autoUpdater.on("error", (err) => {
+    if (isProbing) return; // 探测阶段单个源失败，静默跳过，继续探测下一个源
     updateCheckInProgress = false;
     dialog.showErrorBox("更新失败", `检查更新时出错：${err && err.message ? err.message : err}`);
   });
 }
 
-function checkForUpdates() {
+async function checkForUpdates() {
   if (updateCheckInProgress) return;
   updateCheckInProgress = true;
-  autoUpdater
-    .checkForUpdates()
-    .catch(() => {})
-    .finally(() => {
+  isProbing = true;
+
+  const localVersion = app.getVersion();
+  const candidates = [];
+
+  // 阶段1：逐个源探测其服务器上的最新版本（串行，避免同一 autoUpdater 实例并发冲突）
+  for (const src of UPDATE_SOURCES) {
+    try {
+      autoUpdater.autoDownload = false; // 探测阶段只拿版本号，不下载
+      applyFeedURL(src);
+      const res = await autoUpdater.checkForUpdates();
+      const ver = res && res.updateInfo && res.updateInfo.version;
+      if (ver) candidates.push({ source: src, version: ver });
+    } catch (e) {
+      // 该源探测失败，跳过，继续探测下一个
+    }
+  }
+  isProbing = false;
+
+  if (candidates.length === 0) {
+    updateCheckInProgress = false;
+    dialog.showErrorBox("更新失败", "检查更新时出错：所有更新源都无法连接。");
+    return;
+  }
+
+  // 阶段2：从所有源中选"最新版本"最高的那一个
+  candidates.sort((a, b) => compareVersions(b.version, a.version));
+  const best = candidates[0];
+
+  if (compareVersions(best.version, localVersion) > 0) {
+    // 有更新：切到最高版本对应的源，重新检查并下载
+    autoUpdater.autoDownload = true;
+    try {
+      applyFeedURL(best.source);
+      await autoUpdater.checkForUpdates(); // 触发下载，进度与完成由事件处理
+    } catch (e) {
       updateCheckInProgress = false;
-    });
+      dialog.showErrorBox("更新失败", `检查更新时出错：${e && e.message ? e.message : e}`);
+    }
+  } else {
+    updateCheckInProgress = false;
+    dialog.showMessageBox({ type: "info", title: "检查更新", message: "当前已是最新版本，无需更新。" });
+  }
 }
 
 // ------------------------- 过期与自毁逻辑 -------------------------
