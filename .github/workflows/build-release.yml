@@ -2,10 +2,10 @@ name: 二次构建并发布Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 手动单独运行C时填写版本号
+      new_tag:
+        description: 手动单独运行C时填写tag（如v1.0.7）
         required: true
-        default: 1.0.8
+        default: v1.0.7
   repository_dispatch:
     types: [b-dist-ready]
 
@@ -45,19 +45,24 @@ jobs:
       - name: 打包最终dist为zip
         run: zip -r final-dist.zip dist
 
-      - name: 读取版本号（自动触发/手动触发兼容）
-        id: set_tag
+      - name: 读取tag和标题（自动触发/手动触发兼容）
+        id: set_info
         run: |
-          if [[ "${{ github.event.inputs.version }}" != "" ]]; then
-            echo "TAG=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event.inputs.new_tag }}" != "" ]]; then
+            TAG="${{ github.event.inputs.new_tag }}"
+            VER=${TAG#v}
+            TITLE="dickson-color-v${VER}"
           else
-            echo "TAG=v${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            TAG="${{ github.event.client_payload.new_tag }}"
+            TITLE="${{ github.event.client_payload.release_title }}"
           fi
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "TITLE=$TITLE" >> $GITHUB_OUTPUT
 
       - name: 创建Release并上传压缩包
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.set_tag.outputs.TAG }}
-          name: Release ${{ steps.set_tag.outputs.TAG }}
-          body: "自动构建产物，版本：${{ steps.set_tag.outputs.TAG }}\n来源：A仓库手动启动流水线"
+          tag_name: ${{ steps.set_info.outputs.TAG }}
+          name: ${{ steps.set_info.outputs.TITLE }}
+          body: "自动构建产物\nTag：${{ steps.set_info.outputs.TAG }}\n来源：A仓库手动启动流水线"
           files: final-dist.zip
