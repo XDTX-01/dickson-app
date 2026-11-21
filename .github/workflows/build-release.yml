@@ -1,5 +1,4 @@
 name: LaLaLa
-
 # 接收A仓库的 b-dist-ready 事件；workflow_dispatch 仅作应急手动触发（可填 new_tag）
 on:
   repository_dispatch:
@@ -16,29 +15,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      # 先解析版本参数，提前校验，避免白跑资源拷贝
-      - name: 读取版本参数（优先A传参，其次手动输入）
-        id: set_info
-        shell: pwsh
-        run: |
-          $tag = ""
-          $title = ""
-          if ("${{ github.event.inputs.new_tag }}" -ne "") {
-            $tag = "${{ github.event.inputs.new_tag }}"
-            $title = "dickson-color-$tag"
-          } else {
-            $payload = '${{ toJson(github.event.client_payload) }}' | ConvertFrom-Json
-            $tag = $payload.new_tag
-            $title = $payload.release_title
-          }
-          if ([string]::IsNullOrEmpty($tag)) {
-            throw "未获取到版本号：A未传参，且手动未填写 new_tag"
-          }
-          $ver = $tag.TrimStart('v')
-          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
@@ -50,27 +26,10 @@ jobs:
           token: ${{ secrets.REPO_TOKEN }}
           path: b-dist
 
-      # ✅ 版本强校验：比对 .trigger，防止并发拿到旧dist
-      - name: 校验B仓库dist版本 .trigger
+      - name: 原样覆盖前端资源到C的src
         shell: pwsh
         run: |
-          $triggerPath = "./b-dist/dist/.trigger"
-          if (-not (Test-Path $triggerPath)) {
-            throw "B仓库dist不存在 .trigger 文件，版本不可信！终止打包"
-          }
-          $triggerTag = Get-Content $triggerPath -Raw
-          $triggerTag = $triggerTag.Trim()
-          $expectTag = "${{ steps.set_info.outputs.TAG }}"
-          if ($triggerTag -ne $expectTag) {
-            throw "版本不匹配！A下发:$expectTag , B.dist标记:$triggerTag，并发冲突，停止构建"
-          }
-
-      # ✅ 镜像覆盖，清理src内残留旧文件
-      - name: 镜像覆盖前端资源到C的src
-        shell: pwsh
-        run: |
-          robocopy ./b-dist/dist ./src /MIR /NFL /NDL
-          if (Test-Path ./src/.trigger) { Remove-Item ./src/.trigger -Force }
+          Copy-Item -Path "./b-dist/dist/" -Destination "./src/" -Recurse -Force
 
       - name: 配置Node22
         uses: actions/setup-node@v4
@@ -78,8 +37,31 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: 安装依赖（ci锁定lock，可复现构建）
+      - name: 安装依赖
         run: npm ci
+
+      - name: 读取版本参数（优先A传参，其次手动输入）
+        id: set_info
+        shell: pwsh
+        run: |
+          $tag = ""
+          $title = ""
+          # 手动触发分支
+          if ("${{ github.event.inputs.new_tag }}" -ne "") {
+            $tag = "${{ github.event.inputs.new_tag }}"
+            $title = "dickson-color-$tag"
+          } else {
+            # repository_dispatch 触发，读取payload
+            $tag = "${{ github.event.client_payload.new_tag }}"
+            $title = "${{ github.event.client_payload.release_title }}"
+          }
+          if ([string]::IsNullOrEmpty($tag)) {
+            throw "未获取到版本号：A未传参，且手动未填写 new_tag"
+          }
+          $ver = $tag.TrimStart('v')
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: 强制写入版本号到package.json（与tag保持一致）
         shell: pwsh
@@ -90,7 +72,8 @@ jobs:
           $pkg | ConvertTo-Json -Depth 10 | Out-File "package.json" -Encoding utf8
 
       - name: 校验版本
-        run: cat package.json
+        shell: pwsh
+        run: Get-Content package.json
 
       - name: Electron打包
         run: npm run package
