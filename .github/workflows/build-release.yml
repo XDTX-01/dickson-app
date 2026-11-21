@@ -1,13 +1,12 @@
-name: 二次构建并发布Release
+name: 发布新版本啦
 
-# 接收A仓库的 b-dist-ready 事件；workflow_dispatch 仅作应急手动触发（可填 new_tag）
 on:
   repository_dispatch:
     types: [b-dist-ready]
   workflow_dispatch:
     inputs:
       new_tag:
-        description: 【应急手动】版本号 v1.0.x（正常由A仓库传入，留空则报错）
+        description: 手动指定版本号 vx.x.x
         required: false
 
 jobs:
@@ -19,73 +18,77 @@ jobs:
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
-      - name: 拉取B中转仓库dist资源（XDTX-01/dickson-dist）
+      - name: 拉取B中转仓库dist资源
         uses: actions/checkout@v4
         with:
           repository: XDTX-01/dickson-dist
           ref: main
           token: ${{ secrets.REPO_TOKEN }}
-          path: b-dist
+          path: b-resource
 
-      - name: 原样覆盖前端资源到C的src
+      - name: 镜像同步资源，清理.trigger
         shell: pwsh
         run: |
-          Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
+          robocopy .\b-resource\dist .\src /MIR /NFL /NDL
+          if (Test-Path .\src\.trigger) { Remove-Item .\src\.trigger -Force }
 
-      - name: 配置Node22
+      - name: 设置Node22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
       - name: 安装依赖
-        run: npm install
+        run: npm ci
 
-      - name: 读取版本参数（优先A传参，其次手动输入）
-        id: set_info
+      - name: 解析版本参数
+        id: parse-ver
         shell: pwsh
         run: |
-          $tag = ""
-          $title = ""
           if ("${{ github.event.inputs.new_tag }}" -ne "") {
             $tag = "${{ github.event.inputs.new_tag }}"
             $title = "dickson-color-$tag"
           } else {
-            $payload = '${{ toJson(github.event.client_payload) }}' | ConvertFrom-Json
-            $tag = $payload.new_tag
-            $title = $payload.release_title
+            try {
+              $payload = '${{ toJson(github.event.client_payload) }}' | ConvertFrom-Json
+              $tag = $payload.new_tag
+              $title = $payload.release_title
+            } catch {
+              throw "事件payload解析失败"
+            }
           }
           if ([string]::IsNullOrEmpty($tag)) {
-            throw "未获取到版本号：A未传参，且手动未填写 new_tag"
+            throw "版本号为空"
           }
           $ver = $tag.TrimStart('v')
-          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+          echo "VER=$ver" >> $env:GITHUB_OUTPUT
+          echo "TITLE=$title" >> $env:GITHUB_OUTPUT
 
-      - name: 强制写入版本号到package.json（与tag保持一致）
+      - name: 写入版本号到package.json
         shell: pwsh
         run: |
-          $ver = "${{ steps.set_info.outputs.VER }}"
-          $pkg = Get-Content "package.json" -Raw -Encoding utf8 | ConvertFrom-Json
-          $pkg.version = $ver
-          $pkg | ConvertTo-Json -Depth 10 | Out-File "package.json" -Encoding utf8
-
-      - name: 校验版本
-        run: cat package.json
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $pkg.version = "${{ steps.parse-ver.outputs.VER }}"
+          $pkg | ConvertTo-Json -Depth 10 | Out-File package.json -Encoding utf8
 
       - name: Electron打包
         run: npm run package
 
-      - name: 创建Release并上传产物
+      - name: 校验exe产物
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist/*.exe -ErrorAction SilentlyContinue
+          if (-not $exe) {
+            throw "打包失败，dist无exe文件"
+          }
+
+      - name: 创建Release并上传文件
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.set_info.outputs.TAG }}
-          name: ${{ steps.set_info.outputs.TITLE }}
-          body: "版本 ${{ steps.set_info.outputs.TAG }}，由A仓库自动同步触发构建"
+          tag_name: ${{ steps.parse-ver.outputs.TAG }}
+          name: ${{ steps.parse-ver.outputs.TITLE }}
+          body: "版本 ${{ steps.parse-ver.outputs.TAG }}，由A仓库自动同步触发"
           files: |
             dist/*.exe
-            dist/*.exe.blockmap
-            dist/latest.yml
-        env:
-          GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
+            dist/*.blockmap
