@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       new_tag:
-        description: 版本tag，例如 v1.0.8
+        description: 手动运行时填写tag，如 v1.0.8
         required: true
         default: v1.0.8
   repository_dispatch:
@@ -11,27 +11,27 @@ on:
 
 jobs:
   build-release:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     permissions:
       contents: write
     steps:
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
-      - name: 拉取B仓库dist资源
+      - name: 拉取B仓库dist资源（main分支）
         uses: actions/checkout@v4
         with:
           repository: XDTX-01/dickson-dist
           ref: main
           token: ${{ secrets.REPO_TOKEN }}
-          path: b-source
+          path: b-dist
 
-      - name: 覆盖dist目录
+      - name: 原样复制B仓库dist到C仓库src（完全保留目录结构）
+        shell: pwsh
         run: |
-          rm -rf ./dist
-          cp -r ./b-source/dist ./
+          Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
 
-      - name: Setup Node 22（和本地对齐）
+      - name: 配置Node22
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -40,32 +40,32 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: 解析版本信息
-        id: parse-ver
+      - name: 解析tag和标题
+        id: set_info
+        shell: pwsh
         run: |
-          if [[ "${{ github.event.inputs.new_tag }}" != "" ]]; then
-            TAG="${{ github.event.inputs.new_tag }}"
-          else
-            TAG="${{ github.event.client_payload.new_tag }}"
-          fi
-          VER=${TAG#v}
-          TITLE="dickson-color-v${VER}"
-          echo "TAG=$TAG" >> $GITHUB_OUTPUT
-          echo "VER=$VER" >> $GITHUB_OUTPUT
-          echo "TITLE=$TITLE" >> $GITHUB_OUTPUT
+          if ("${{ github.event.inputs.new_tag }}" -ne "") {
+            $tag = "${{ github.event.inputs.new_tag }}"
+            $ver = $tag.TrimStart('v')
+            $title = "dickson-color-v$ver"
+          } else {
+            $payload = '${{ toJson(github.event.client_payload) }}' | ConvertFrom-Json
+            $tag = $payload.new_tag
+            $title = $payload.release_title
+          }
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Electron Builder 打包
+      - name: Electron打包Windows安装包
         run: npm run build
 
-      - name: 创建Release，上传产物
+      - name: 创建Release并上传产物
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.parse-ver.outputs.TAG }}
-          name: ${{ steps.parse-ver.outputs.TITLE }}
-          body: |
-            自动构建版本 ${{ steps.parse-ver.outputs.TAG }}
-            由A仓库流水线自动同步dist并触发打包
+          tag_name: ${{ steps.set_info.outputs.TAG }}
+          name: ${{ steps.set_info.outputs.TITLE }}
+          body: "自动构建产物 ${{ steps.set_info.outputs.TAG }}，由A仓库流水线同步前端后触发"
           files: |
-            ./dist/dickson-color-studio-Setup-${{ steps.parse-ver.outputs.VER }}.exe
-            ./dist/dickson-color-studio-Setup-${{ steps.parse-ver.outputs.VER }}.exe.blockmap
-            ./dist/latest.yml
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
