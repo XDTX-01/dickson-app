@@ -18,10 +18,11 @@ jobs:
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
-      - name: 拉取B仓库的dist资源
+      - name: 拉取B仓库的dist资源（main分支）
         uses: actions/checkout@v4
         with:
           repository: XDTX-01/dickson-dist
+          ref: main
           token: ${{ secrets.REPO_TOKEN }}
           path: b-source
 
