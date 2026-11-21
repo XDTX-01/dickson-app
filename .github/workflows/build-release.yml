@@ -1,0 +1,62 @@
+name: 二次构建并发布Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 手动单独运行C时填写版本号
+        required: true
+        default: 1.0.8
+  repository_dispatch:
+    types: [b-dist-ready]
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 拉取C仓库源码
+        uses: actions/checkout@v4
+
+      - name: 拉取B仓库的dist资源
+        uses: actions/checkout@v4
+        with:
+          repository: XDTX-01/dickson-dist
+          token: ${{ secrets.REPO_TOKEN }}
+          path: b-source
+
+      - name: 将B的dist复制到C项目目录
+        run: |
+          rm -rf ./dist
+          cp -r ./b-source/dist ./
+
+      - name: 配置Node20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 执行C项目二次构建命令
+        run: |
+          npm ci
+          npm run build
+
+      - name: 打包最终dist为zip
+        run: zip -r final-dist.zip dist
+
+      - name: 读取版本号（自动触发/手动触发兼容）
+        id: set_tag
+        run: |
+          if [[ "${{ github.event.inputs.version }}" != "" ]]; then
+            echo "TAG=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=v${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 创建Release并上传压缩包
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.set_tag.outputs.TAG }}
+          name: Release ${{ steps.set_tag.outputs.TAG }}
+          body: "自动构建产物，版本：${{ steps.set_tag.outputs.TAG }}\n来源：A仓库手动启动流水线"
+          files: final-dist.zip
