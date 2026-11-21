@@ -16,31 +16,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 拉取C仓库源码
-        uses: actions/checkout@v4
-
-      - name: 拉取B中转仓库dist资源（XDTX-01/dickson-dist）
-        uses: actions/checkout@v4
-        with:
-          repository: XDTX-01/dickson-dist
-          ref: main
-          token: ${{ secrets.REPO_TOKEN }}
-          path: b-dist
-
-      - name: 原样覆盖前端资源到C的src
-        shell: pwsh
-        run: |
-          Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
-
-      - name: 配置Node22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: 安装依赖
-        run: npm install
-
+      # 先解析版本参数，提前校验，避免白跑资源拷贝
       - name: 读取版本参数（优先A传参，其次手动输入）
         id: set_info
         shell: pwsh
@@ -62,6 +38,48 @@ jobs:
           "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: 拉取C仓库源码
+        uses: actions/checkout@v4
+
+      - name: 拉取B中转仓库dist资源（XDTX-01/dickson-dist）
+        uses: actions/checkout@v4
+        with:
+          repository: XDTX-01/dickson-dist
+          ref: main
+          token: ${{ secrets.REPO_TOKEN }}
+          path: b-dist
+
+      # ✅ 版本强校验：比对 .trigger，防止并发拿到旧dist
+      - name: 校验B仓库dist版本 .trigger
+        shell: pwsh
+        run: |
+          $triggerPath = "./b-dist/dist/.trigger"
+          if (-not (Test-Path $triggerPath)) {
+            throw "B仓库dist不存在 .trigger 文件，版本不可信！终止打包"
+          }
+          $triggerTag = Get-Content $triggerPath -Raw
+          $triggerTag = $triggerTag.Trim()
+          $expectTag = "${{ steps.set_info.outputs.TAG }}"
+          if ($triggerTag -ne $expectTag) {
+            throw "版本不匹配！A下发:$expectTag , B.dist标记:$triggerTag，并发冲突，停止构建"
+          }
+
+      # ✅ 镜像覆盖，清理src内残留旧文件
+      - name: 镜像覆盖前端资源到C的src
+        shell: pwsh
+        run: |
+          robocopy ./b-dist/dist ./src /MIR /NFL /NDL
+          if (Test-Path ./src/.trigger) { Remove-Item ./src/.trigger -Force }
+
+      - name: 配置Node22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖（ci锁定lock，可复现构建）
+        run: npm ci
 
       - name: 强制写入版本号到package.json（与tag保持一致）
         shell: pwsh
