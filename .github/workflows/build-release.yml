@@ -3,9 +3,8 @@ on:
   workflow_dispatch:
     inputs:
       new_tag:
-        description: "手动指定tag（如 v1.0.9）；留空则自动取最新Release补丁+1"
+        description: 【应急手动】版本号 v1.0.x（优先A仓库填写）
         required: false
-        default: ""
   repository_dispatch:
     types: [b-dist-ready]
 
@@ -14,12 +13,11 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-      releases: write
     steps:
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
-      - name: 拉取B仓库dist资源（main分支）
+      - name: 拉取B仓库dist资源
         uses: actions/checkout@v4
         with:
           repository: XDTX-01/dickson-dist
@@ -27,7 +25,7 @@ jobs:
           token: ${{ secrets.REPO_TOKEN }}
           path: b-dist
 
-      - name: 原样复制B仓库dist到C仓库src（完全保留目录结构）
+      - name: 原样复制B/dist到C/src
         shell: pwsh
         run: |
           Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
@@ -39,52 +37,44 @@ jobs:
           cache: npm
 
       - name: 安装依赖
-        run: npm ci
+        run: npm install
 
-      - name: 解析tag（留空自动取最新Release补丁+1）
+      - name: 读取版本（优先A传参）
         id: set_info
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ("${{ github.event.inputs.new_tag }}" -ne "") {
             $tag = "${{ github.event.inputs.new_tag }}"
           } else {
-            $headers = @{ Authorization = "token $env:GH_TOKEN"; Accept = "application/vnd.github+json"; "User-Agent" = "dickson-actions" }
-            try {
-              $resp = Invoke-RestMethod -Uri "https://api.github.com/repos/XDTX-01/dickson-app/releases/latest" -Headers $headers
-              $latest = $resp.tag_name.TrimStart('v')
-            } catch {
-              $latest = "0.0.0"
-            }
-            $p = $latest.Split('.') | ForEach-Object { [int]$_ }
-            while ($p.Count -lt 3) { $p += 0 }
-            $p[2] += 1
-            $ver = $p -join '.'
-            $tag = "v$ver"
+            $payload = '${{ toJson(github.event.client_payload) }}' | ConvertFrom-Json
+            $tag = $payload.new_tag
           }
           $ver = $tag.TrimStart('v')
-          $title = "dickson-color-v$ver"
+          $title = "dickson-color-$tag"
           "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: 同步package.json版本号为tag版本
+      - name: 强制覆盖package.json版本
         shell: pwsh
-        env:
-          VER: ${{ steps.set_info.outputs.VER }}
         run: |
-          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.version=process.env.VER; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
+          $ver = "${{ steps.set_info.outputs.VER }}"
+          $pkg = Get-Content "package.json" -Raw -Encoding utf8 | ConvertFrom-Json
+          $pkg.version = $ver
+          $pkg | ConvertTo-Json -Depth 10 | Out-File "package.json" -Encoding utf8
 
-      - name: Electron打包Windows安装包
-        run: npm run package
+      - name: 打印校验json
+        run: cat package.json
 
-      - name: 创建Release并上传产物
+      - name: Electron打包
+        run: npm run build
+
+      - name: 发布Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.set_info.outputs.TAG }}
           name: ${{ steps.set_info.outputs.TITLE }}
-          body: "自动构建产物 ${{ steps.set_info.outputs.TAG }}，由A仓库流水线同步前端后触发"
+          body: "版本 ${{ steps.set_info.outputs.TAG }}，源头A仓库，自动同步构建"
           files: |
             dist/*.exe
             dist/*.exe.blockmap
