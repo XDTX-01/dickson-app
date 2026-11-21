@@ -31,15 +31,14 @@ jobs:
           rm -rf ./dist
           cp -r ./b-source/dist ./
 
-      - name: Setup Node 20
+      - name: Setup Node 22（和本地对齐）
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: 安装依赖
         run: npm ci
-        # 锁文件没修好的时候临时改成 npm install
 
       - name: 解析版本信息
         id: parse-ver
