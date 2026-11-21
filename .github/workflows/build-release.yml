@@ -16,7 +16,7 @@ jobs:
       - name: 拉取B中转仓库dist资源
         uses: actions/checkout@v4
         with:
-          repository: XDTX/dickson-dist
+          repository: XDTX-01/dickson-dist
           ref: main
           token: ${{ secrets.REPO_TOKEN }}
           path: b-dist
@@ -66,7 +66,7 @@ jobs:
         with:
           tag_name: ${{ steps.set_info.outputs.TAG }}
           name: ${{ steps.set_info.outputs.TITLE }}
-          body: "版本 ${{ steps.set_info.outputs.TAG }}，由A仓库自动计算版本同步构建"
+          body: "版本 ${{ steps.set_info.outputs.TAG }}，由A仓库自动同步触发"
           files: |
             dist/*.exe
             dist/*.exe.blockmap
