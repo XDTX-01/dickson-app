@@ -26,9 +26,10 @@ jobs:
           token: ${{ secrets.REPO_TOKEN }}
           path: b-dist
 
-      - name: 原样覆盖前端资源到C的src
+      - name: 清理src（仅保留 icon.ico、preload.js）
         shell: pwsh
         run: |
+          Get-ChildItem "./src/*" -Exclude "icon.ico","preload.js" | Remove-Item -Recurse -Force
           Copy-Item -Path "./b-dist/dist/" -Destination "./src/" -Recurse -Force
 
       - name: 配置Node22
