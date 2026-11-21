@@ -30,7 +30,7 @@ jobs:
         shell: pwsh
         run: |
           Get-ChildItem "./src/*" -Exclude "icon.ico","preload.js" | Remove-Item -Recurse -Force
-          Copy-Item -Path "./b-dist/dist/" -Destination "./src/" -Recurse -Force
+          Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
 
       - name: 配置Node22
         uses: actions/setup-node@v4
