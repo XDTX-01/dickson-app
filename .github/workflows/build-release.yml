@@ -59,7 +59,7 @@ jobs:
         run: cat package.json
 
       - name: Electron打包
-        run: npm run build
+        run: npm run package
 
       - name: 创建Release
         uses: softprops/action-gh-release@v2
