@@ -13,20 +13,20 @@ jobs:
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
-      - name: 拉取B仓库dist资源
+      - name: 拉取B中转仓库dist资源
         uses: actions/checkout@v4
         with:
-          repository: XDTX-01/dickson-dist
+          repository: XDTX/dickson-dist
           ref: main
           token: ${{ secrets.REPO_TOKEN }}
           path: b-dist
 
-      - name: 原样复制B/dist到C/src
+      - name: 覆盖前端资源到src
         shell: pwsh
         run: |
           Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
 
-      - name: 配置Node22
+      - name: 配置Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -35,7 +35,7 @@ jobs:
       - name: 安装依赖
         run: npm install
 
-      - name: 读取A传过来的版本参数
+      - name: 读取版本payload
         id: set_info
         shell: pwsh
         run: |
@@ -47,7 +47,7 @@ jobs:
           "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: 强制写入版本到package.json
+      - name: 修改package.json版本
         shell: pwsh
         run: |
           $ver = "${{ steps.set_info.outputs.VER }}"
@@ -61,7 +61,7 @@ jobs:
       - name: Electron打包
         run: npm run package
 
-      - name: 创建Release
+      - name: 发布Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.set_info.outputs.TAG }}
