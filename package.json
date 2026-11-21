@@ -5,8 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win --x64",
-    "package": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && electron-builder --win --x64"
+    "package": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && electron-builder --win --x64 --publish never"
   },
   "author": "Little Deng Student",
   "license": "MIT",
