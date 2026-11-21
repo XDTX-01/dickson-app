@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       new_tag:
-        description: 手动运行时填写tag，如 v1.0.8
+        description: 手动运行时填写tag，如 v1.0.5
         required: true
-        default: v1.0.8
+        default: v1.0.5
   repository_dispatch:
     types: [b-dist-ready]
 
@@ -57,7 +57,7 @@ jobs:
           "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Electron打包Windows安装包
-        run: npm run build
+        run: npm run package
 
       - name: 创建Release并上传产物
         uses: softprops/action-gh-release@v2
