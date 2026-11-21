@@ -1,4 +1,4 @@
-name: 发布新版本啦
+name: LaLaLa
 
 on:
   repository_dispatch:
