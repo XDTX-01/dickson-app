@@ -103,7 +103,7 @@ jobs:
           Write-Host "本次发布：TAG=$tag / TITLE=$title"
 
       - name: 强制写入版本号到 package.json（与 tag 保持一致）
-        shell: pwwsh
+        shell: pwsh
         env:
           VER: ${{ steps.set_info.outputs.VER }}
         run: |
