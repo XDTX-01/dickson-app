@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       new_tag:
-        description: 手动单独运行C时填写tag（如v1.0.7）
+        description: 版本tag，例如 v1.0.8
         required: true
-        default: v1.0.7
+        default: v1.0.8
   repository_dispatch:
     types: [b-dist-ready]
 
@@ -18,7 +18,7 @@ jobs:
       - name: 拉取C仓库源码
         uses: actions/checkout@v4
 
-      - name: 拉取B仓库的dist资源（main分支）
+      - name: 拉取B仓库dist资源
         uses: actions/checkout@v4
         with:
           repository: XDTX-01/dickson-dist
@@ -26,43 +26,47 @@ jobs:
           token: ${{ secrets.REPO_TOKEN }}
           path: b-source
 
-      - name: 将B的dist复制到C项目目录
+      - name: 覆盖dist目录
         run: |
           rm -rf ./dist
           cp -r ./b-source/dist ./
 
-      - name: 配置Node20
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: 执行C项目二次构建命令
-        run: |
-          npm ci
-          npm run build
+      - name: 安装依赖
+        run: npm ci
+        # 锁文件没修好的时候临时改成 npm install
 
-      - name: 打包最终dist为zip
-        run: zip -r final-dist.zip dist
-
-      - name: 读取tag和标题（自动触发/手动触发兼容）
-        id: set_info
+      - name: 解析版本信息
+        id: parse-ver
         run: |
           if [[ "${{ github.event.inputs.new_tag }}" != "" ]]; then
             TAG="${{ github.event.inputs.new_tag }}"
-            VER=${TAG#v}
-            TITLE="dickson-color-v${VER}"
           else
             TAG="${{ github.event.client_payload.new_tag }}"
-            TITLE="${{ github.event.client_payload.release_title }}"
           fi
+          VER=${TAG#v}
+          TITLE="dickson-color-v${VER}"
           echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "VER=$VER" >> $GITHUB_OUTPUT
           echo "TITLE=$TITLE" >> $GITHUB_OUTPUT
 
-      - name: 创建Release并上传压缩包
+      - name: Electron Builder 打包
+        run: npm run build
+
+      - name: 创建Release，上传产物
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.set_info.outputs.TAG }}
-          name: ${{ steps.set_info.outputs.TITLE }}
-          body: "自动构建产物\nTag：${{ steps.set_info.outputs.TAG }}\n来源：A仓库手动启动流水线"
-          files: final-dist.zip
+          tag_name: ${{ steps.parse-ver.outputs.TAG }}
+          name: ${{ steps.parse-ver.outputs.TITLE }}
+          body: |
+            自动构建版本 ${{ steps.parse-ver.outputs.TAG }}
+            由A仓库流水线自动同步dist并触发打包
+          files: |
+            ./dist/dickson-color-studio-Setup-${{ steps.parse-ver.outputs.VER }}.exe
+            ./dist/dickson-color-studio-Setup-${{ steps.parse-ver.outputs.VER }}.exe.blockmap
+            ./dist/latest.yml
