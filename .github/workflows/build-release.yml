@@ -1,19 +1,19 @@
-name: 二次构建并发布Release
+name: 接收B资源，执行Release发布
 on:
   repository_dispatch:
     types: [b-dist-ready]
-  workflow_dispatch:
 
 jobs:
-  build-release:
-    runs-on: windows-latest
-    permissions:
-      contents: write
+  release:
+    runs-on: ubuntu-latest
     steps:
-      - name: 拉取C仓库源码
-        uses: actions/checkout@v4
+      - name: 读取上游传入版本
+        id: payload
+        run: |
+          echo "NEW_TAG=${{ github.event.client_payload.new_tag }}" >> $GITHUB_OUTPUT
+          echo "RELEASE_TITLE=${{ github.event.client_payload.release_title }}" >> $GITHUB_OUTPUT
 
-      - name: 拉取B中转仓库dist资源
+      - name: 拉取中转仓库B dickson-dist
         uses: actions/checkout@v4
         with:
           repository: XDTX-01/dickson-dist
@@ -21,53 +21,17 @@ jobs:
           token: ${{ secrets.REPO_TOKEN }}
           path: b-dist
 
-      - name: 覆盖前端资源到src
-        shell: pwsh
+      - name: 打包dist为发布压缩包
         run: |
-          Copy-Item -Path "./b-dist/dist/*" -Destination "./src/" -Recurse -Force
+          cd b-dist
+          zip -r dist.zip dist/
 
-      - name: 配置Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: 安装依赖
-        run: npm install
-
-      - name: 读取版本payload
-        id: set_info
-        shell: pwsh
-        run: |
-          $payload = '${{ toJson(github.event.client_payload) }}' | ConvertFrom-Json
-          $tag = $payload.new_tag
-          $ver = $tag.TrimStart('v')
-          $title = $payload.release_title
-          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "VER=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "TITLE=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: 修改package.json版本
-        shell: pwsh
-        run: |
-          $ver = "${{ steps.set_info.outputs.VER }}"
-          $pkg = Get-Content "package.json" -Raw -Encoding utf8 | ConvertFrom-Json
-          $pkg.version = $ver
-          $pkg | ConvertTo-Json -Depth 10 | Out-File "package.json" -Encoding utf8
-
-      - name: 校验版本
-        run: cat package.json
-
-      - name: Electron打包
-        run: npm run package
-
-      - name: 发布Release
+      - name: 创建Github Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.set_info.outputs.TAG }}
-          name: ${{ steps.set_info.outputs.TITLE }}
-          body: "版本 ${{ steps.set_info.outputs.TAG }}，由A仓库自动同步触发"
-          files: |
-            dist/*.exe
-            dist/*.exe.blockmap
-            dist/latest.yml
+          tag_name: ${{ steps.payload.outputs.NEW_TAG }}
+          name: ${{ steps.payload.outputs.RELEASE_TITLE }}
+          files: b-dist/dist.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
