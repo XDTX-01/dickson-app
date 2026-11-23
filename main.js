@@ -10,6 +10,9 @@ const os = require("os");
 const fs = require("fs/promises"); // 使用Promise版本的fs
 // 原生保护模块：过期判定、文件完整性自检（C++ 编译，无明文逻辑）
 // 本地开发（无编译产物）时降级为桩函数，保证 npm start 可直接跑；生产环境加载真实模块
+// 部分受限环境（沙箱代理被策略禁用）渲染进程会直接崩溃，关闭沙箱保证可运行
+app.commandLine.appendSwitch("no-sandbox");
+app.disableHardwareAcceleration(); // 部分机器 GPU 初始化导致渲染进程崩溃，关闭硬加速
 let native = null;
 try {
   native = require("./protect/protect.node");
