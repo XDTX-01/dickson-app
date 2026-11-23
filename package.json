@@ -23,7 +23,8 @@
     "productName": "dickson-color-studio",
     "asar": true,
     "asarUnpack": [
-      "**/*.node"
+      "**/*.node",
+      "build-protect/**/*"
     ],
     "compression": "maximum",
     "files": [
@@ -40,7 +41,8 @@
       "!release.js",
       "!scripts/**",
       "!protect/protect.cc",
-      "!protect/binding.gyp"
+      "!protect/binding.gyp",
+      "!protect/build/**"
     ],
     "win": {
       "icon": "src/icon.ico",
