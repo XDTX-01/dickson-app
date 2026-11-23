@@ -33,6 +33,7 @@
       "bootstrap.js",
       "main.js",
       "src/**/*",
+      "update-ui/**/*",
       "package.json",
       "!**/*.map",
       "!**/*.gz",

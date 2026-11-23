@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+<title>软件更新</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "PingFang SC", system-ui, sans-serif;
+    color: #101828;
+    background: #ffffff;
+    overflow: hidden;
+    user-select: none;
+    font-size: 13px;
+  }
+  .app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------- 自绘标题栏 ---------- */
+  .titlebar {
+    flex: 0 0 38px; height: 38px;
+    display: flex; align-items: center;
+    padding: 0 4px 0 16px;
+    background: #ffffff;
+    border-bottom: 1px solid #eef1f5;
+    -webkit-app-region: drag;
+  }
+  .titlebar .name { font-size: 12px; color: #8b94a3; letter-spacing: .3px; }
+  .titlebar .spacer { flex: 1; }
+  .win-close {
+    width: 40px; height: 28px; border: 0; background: transparent; color: #6b7280;
+    font-size: 13px; line-height: 1; border-radius: 6px; cursor: pointer;
+    -webkit-app-region: no-drag; transition: background .15s, color .15s;
+  }
+  .win-close:hover { background: #ef4444; color: #ffffff; }
+
+  /* ---------- 头部 ---------- */
+  .hero {
+    display: flex; gap: 14px; align-items: flex-start;
+    padding: 20px 26px 16px;
+    background: linear-gradient(180deg, #f6f9ff 0%, #ffffff 100%);
+    -webkit-app-region: drag;
+  }
+  .logo {
+    position: relative; flex: 0 0 46px; width: 46px; height: 46px;
+    border-radius: 12px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #2563eb 0%, #6aa8ff 100%);
+    box-shadow: 0 6px 16px rgba(37, 99, 235, .22);
+  }
+  .logo .letter { color: #ffffff; font-size: 20px; font-weight: 700; }
+  .logo img {
+    position: absolute; top: 3px; left: 3px;
+    width: calc(100% - 6px); height: calc(100% - 6px);
+    border-radius: 9px;
+    object-fit: contain; background: #ffffff;
+  }
+  .hero-text { min-width: 0; padding-top: 1px; }
+  .hero-text h1 {
+    margin: 0 0 5px; font-size: 19px; font-weight: 600;
+    letter-spacing: .3px; line-height: 1.35; color: #0d1526;
+  }
+  .hero-text p {
+    margin: 0; font-size: 12.5px; line-height: 1.65; color: #6b7280;
+    word-break: break-word;
+  }
+
+  /* ---------- 内容区 ---------- */
+  .content {
+    flex: 1 1 auto; min-height: 0;
+    padding: 2px 26px 8px;
+    overflow-y: auto; overflow-x: hidden;
+    -webkit-app-region: no-drag;
+  }
+  .content.fade { animation: fade .18s ease-out; }
+  .content.center { display: flex; flex-direction: column; justify-content: center; }
+  @keyframes fade {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ---------- 进度条 ---------- */
+  .pct-row { display: flex; align-items: baseline; gap: 8px; margin: 6px 0 10px; }
+  .pct {
+    font-size: 26px; font-weight: 700; color: #2563eb;
+    font-variant-numeric: tabular-nums; letter-spacing: .4px;
+  }
+  .pct small { font-size: 13px; font-weight: 500; color: #9aa3b2; margin-left: 1px; }
+  .bar {
+    height: 9px; border-radius: 999px; background: #edf1f6;
+    overflow: hidden; position: relative;
+  }
+  .bar > i {
+    display: block; height: 100%; width: 0; border-radius: 999px;
+    background: linear-gradient(90deg, #2563eb 0%, #62a4ff 100%);
+    transition: width .18s linear;
+  }
+  .bar.indeterminate > i { width: 36%; animation: slide 1.3s ease-in-out infinite; }
+  .bar.indeterminate::before {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, rgba(37, 99, 235, .12) 0%, rgba(37, 99, 235, .04) 100%);
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-110%); }
+    100% { transform: translateX(330%); }
+  }
+  .meta {
+    display: flex; justify-content: space-between; gap: 12px;
+    margin-top: 11px; font-size: 12px; color: #6b7280;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta .right { color: #98a2b3; }
+
+  /* ---------- 更新说明 ---------- */
+  .notes {
+    margin-top: 12px; border: 1px solid #edf0f4; border-radius: 10px;
+    background: #f9fbfd; padding: 10px 12px 8px;
+  }
+  .notes-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .notes-head b { font-size: 12px; color: #101828; font-weight: 600; }
+  .notes-body {
+    font-size: 12px; line-height: 1.78; color: #4b5563;
+    max-height: 100px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-word;
+    user-select: text;
+  }
+  .notes-body::-webkit-scrollbar,
+  .content::-webkit-scrollbar { width: 6px; }
+  .notes-body::-webkit-scrollbar-thumb,
+  .content::-webkit-scrollbar-thumb { background: #dce3ec; border-radius: 3px; }
+
+  /* ---------- 完成 / 提示块 ---------- */
+  .done {
+    display: flex; gap: 12px; margin-top: 6px; padding: 14px;
+    border-radius: 10px; background: #f5faf8; border: 1px solid #e4f2ea;
+  }
+  .tick {
+    flex: 0 0 30px; width: 30px; height: 30px; border-radius: 50%;
+    background: #10b981; color: #ffffff; font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tick.info { background: #2563eb; }
+  .done b { display: block; margin-bottom: 4px; font-size: 13px; color: #0f172a; }
+  .done p { margin: 0; font-size: 12px; line-height: 1.65; color: #64748b; }
+
+  .notice {
+    margin-top: 10px; padding: 8px 11px; border-radius: 8px;
+    background: #fffbeb; border: 1px solid #fdf0cd;
+    font-size: 12px; line-height: 1.6; color: #9a6700;
+  }
+  .err {
+    margin-top: 6px; padding: 11px 13px; border-radius: 9px;
+    background: #fff6f5; border: 1px solid #fbe2df;
+    border-left: 3px solid #ef4444;
+    font-size: 12.5px; line-height: 1.72; color: #b42318;
+    white-space: pre-wrap; word-break: break-word;
+    user-select: text;
+    max-height: 150px; overflow-y: auto;
+  }
+  .hint { margin: 12px 0 0; font-size: 12px; color: #8b94a3; line-height: 1.7; }
+
+  /* ---------- 更新信息摘要 ---------- */
+  .info-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px dashed #edf0f4;
+  }
+  .info-grid .cell span { display: block; font-size: 11px; color: #98a2b3; margin-bottom: 4px; }
+  .info-grid .cell b { font-size: 12.5px; font-weight: 500; color: #101828; }
+  .info-grid .cell b.strong { color: #2563eb; }
+
+  /* ---------- 底部按钮 ---------- */
+  .footer {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: 13px 26px 15px;
+    border-top: 1px solid #f1f3f7;
+    background: #ffffff;
+    -webkit-app-region: no-drag;
+  }
+  .foot-left { flex: 1 1 auto; font-size: 11.5px; color: #98a2b3; line-height: 1.5; }
+  .foot-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .btn {
+    height: 34px; padding: 0 16px; border-radius: 8px;
+    border: 1px solid transparent; cursor: pointer;
+    font-family: inherit; font-size: 13px; letter-spacing: .2px;
+    transition: background .15s, border-color .15s, box-shadow .15s, transform .1s;
+  }
+  .btn.primary {
+    background: #2563eb; color: #ffffff;
+    box-shadow: 0 4px 10px rgba(37, 99, 235, .22);
+  }
+  .btn.primary:hover { background: #1d4ed8; }
+  .btn.primary:active { transform: translateY(1px); box-shadow: none; }
+  .btn.secondary { background: #ffffff; border-color: #dfe4ea; color: #374151; }
+  .btn.secondary:hover { background: #f6f8fa; border-color: #cfd6de; }
+  .btn.ghost { background: transparent; color: #6b7280; padding: 0 10px; }
+  .btn.ghost:hover { background: #f4f6f9; color: #101828; }
+  .btn:focus-visible { outline: 2px solid rgba(37, 99, 235, .45); outline-offset: 1px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="titlebar">
+    <span class="name">软件更新</span>
+    <span class="spacer"></span>
+    <button class="win-close" id="winClose" title="关闭">✕</button>
+  </div>
+
+  <div class="hero">
+    <div class="logo"><span class="letter">D</span><img id="appIcon" src="../src/icon.ico" alt="" /></div>
+    <div class="hero-text">
+      <h1 id="heading">正在检查更新</h1>
+      <p id="sub"></p>
+    </div>
+  </div>
+
+  <div class="content" id="content"></div>
+
+  <div class="footer">
+    <div class="foot-left" id="footLeft"></div>
+    <div class="foot-right" id="buttons"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var state = {
+    appName: "dickson-color-studio",
+    currentVersion: "",
+    phase: "checking",
+    version: "",
+    notes: "",
+    releaseDate: "",
+    sizeBytes: 0,
+    percent: 0,
+    transferred: 0,
+    total: 0,
+    bytesPerSecond: 0,
+    remainingSeconds: 0,
+    message: "",
+    notice: "",
+    lastCheckAt: "",
+    sourceLabel: "",
+    probeMs: 0
+  };
+
+  var bridge = window.updateUI || null;
+
+  var headingEl = document.getElementById("heading");
+  var subEl = document.getElementById("sub");
+  var contentEl = document.getElementById("content");
+  var buttonsEl = document.getElementById("buttons");
+  var footEl = document.getElementById("footLeft");
+  var closeEl = document.getElementById("winClose");
+  var iconEl = document.getElementById("appIcon");
+
+  // 图标加载失败时退回渐变字母块，避免出现破图
+  if (iconEl) iconEl.addEventListener("error", function () { iconEl.remove(); });
+
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+  function mb(bytes) { return ((bytes || 0) / 1048576).toFixed(1); }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  function fmtSeconds(sec) {
+    if (!sec || !isFinite(sec) || sec <= 0) return "计算中…";
+    var total = Math.round(sec);
+    var m = Math.floor(total / 60);
+    var s = total % 60;
+    if (m <= 0) return s + " 秒";
+    return m + " 分 " + pad2(s) + " 秒";
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+  }
+
+  function fmtDateTime(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return fmtDate(iso) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  /* ---------------- 各状态的界面 ---------------- */
+
+  var VIEWS = {
+    checking: function (s) {
+      var info =
+        '<div class="info-grid">' +
+        '<div class="cell"><span>当前版本</span><b>v' + esc(s.currentVersion || "—") + "</b></div>" +
+        '<div class="cell"><span>更新源</span><b>GitHub / COS 并发</b></div>' +
+        '<div class="cell"><span>取版策略</span><b class="strong">版本优先 · 同版本取快源</b></div>' +
+        "</div>";
+      return {
+        heading: "正在检查更新",
+        sub: "正在向更新服务器查询 " + (s.appName || "本软件") + " 的最新版本，请稍候…",
+        content:
+          '<div class="bar indeterminate"><i></i></div>' +
+          '<div class="meta"><span>已连接更新源</span><span class="right">当前版本 v' +
+          esc(s.currentVersion || "—") + "</span></div>" +
+          info,
+        foot: "通常几秒内即可完成",
+        buttons: [{ id: "close", label: "取消", kind: "secondary" }]
+      };
+    },
+
+    available: function (s) {
+      var extra = [];
+      if (s.sizeBytes) extra.push("安装包 " + mb(s.sizeBytes) + " MB");
+      if (s.releaseDate) extra.push("发布于 " + fmtDate(s.releaseDate));
+
+      var notes = s.notes
+        ? '<div class="notes">' +
+          '<div class="notes-head"><b>更新内容</b></div>' +
+          '<div class="notes-body">' + esc(s.notes) + "</div></div>"
+        : "";
+
+      var info =
+        '<div class="info-grid">' +
+        '<div class="cell"><span>安装包大小</span><b>' +
+        (s.sizeBytes ? mb(s.sizeBytes) + " MB" : "—") + "</b></div>" +
+        '<div class="cell"><span>安装方式</span><b>覆盖安装</b></div>' +
+        '<div class="cell"><span>现有配置</span><b class="strong">全部保留</b></div>' +
+        "</div>";
+
+      return {
+        heading: "发现新版本 v" + (s.version || ""),
+        // 这里需要换行，故用 innerHTML 之外的写法：改由 content 承担，sub 只用单行
+        sub: "当前版本 v" + (s.currentVersion || "—") + " → 最新版本 v" + (s.version || ""),
+        content:
+          notes + info + (s.notice ? '<div class="notice">' + esc(s.notice) + "</div>" : ""),
+        foot: extra.length ? extra.join(" · ") : "选择“立即更新”将自动下载安装包",
+        buttons: [
+          { id: "skip", label: "跳过此版本", kind: "ghost" },
+          { id: "later", label: "稍后提醒", kind: "secondary" },
+          { id: "update-now", label: "立即更新", kind: "primary" }
+        ]
+      };
+    },
+
+    downloading: function (s) {
+      var pct = Math.min(100, Math.max(0, s.percent || 0));
+      var speed = s.bytesPerSecond ? mb(s.bytesPerSecond) + " MB/s" : "—";
+      var left = mb(s.transferred) + " MB / " + mb(s.total) + " MB";
+
+      var sourceText = s.sourceLabel || "自动选择最优源";
+      if (s.probeMs) sourceText += " · " + s.probeMs + " ms";
+
+      var info =
+        '<div class="info-grid">' +
+        '<div class="cell"><span>下载源</span><b>' + esc(sourceText) + "</b></div>" +
+        '<div class="cell"><span>已接收</span><b>' + mb(s.transferred) + " MB</b></div>" +
+        '<div class="cell"><span>完成后</span><b class="strong">可立即安装</b></div>' +
+        "</div>";
+
+      return {
+        heading: "正在下载 v" + (s.version || ""),
+        sub: "下载完成后可选择立即安装，也可以先放到后台继续使用软件",
+        content:
+          '<div class="pct-row"><span class="pct">' + pct.toFixed(1) +
+          '<small>%</small></span></div>' +
+          '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+          '<div class="meta"><span>' + left + " · " + speed +
+          '</span><span class="right">剩余 ' + fmtSeconds(s.remainingSeconds) + "</span></div>" +
+          info +
+          (s.notice ? '<div class="notice">' + esc(s.notice) + "</div>" : ""),
+        foot: "请保持网络连接，关闭此窗口后仍会继续下载",
+        buttons: [
+          { id: "cancel-download", label: "取消下载", kind: "secondary" },
+          { id: "background", label: "后台下载", kind: "primary" }
+        ]
+      };
+    },
+
+    ready: function (s) {
+      return {
+        center: true,
+        heading: "更新已就绪",
+        sub: "v" + (s.version || "") + " 已下载完成，重启应用即可完成安装",
+        content:
+          '<div class="done"><span class="tick">✓</span><div>' +
+          "<b>安装包校验通过</b>" +
+          "<p>重启前请先保存正在编辑的内容。选择“稍后安装”时，应用退出后会自动完成安装。</p>" +
+          "</div></div>",
+        foot: "安装过程约需 10-30 秒，期间应用会短暂关闭",
+        buttons: [
+          { id: "install-later", label: "稍后安装", kind: "secondary" },
+          { id: "restart-install", label: "立即重启安装", kind: "primary" }
+        ]
+      };
+    },
+
+    latest: function (s) {
+      return {
+        center: true,
+        heading: "当前已是最新版本",
+        sub: "版本 v" + (s.currentVersion || "—") + " 无需更新",
+        content:
+          '<div class="done"><span class="tick info">✓</span><div>' +
+          "<b>更新检查完成</b>" +
+          "<p>有新版本发布时，应用启动后会自动提示，无需手动检查。</p>" +
+          "</div></div>",
+        foot: s.lastCheckAt ? "检查时间：" + fmtDateTime(s.lastCheckAt) : "",
+        buttons: [{ id: "close", label: "关闭", kind: "primary" }]
+      };
+    },
+
+    error: function (s) {
+      return {
+        center: true,
+        heading: "检查更新失败",
+        sub: "可稍后重试，或联系客服获取最新版本",
+        content: '<div class="err">' + esc(s.message || "未知错误") + "</div>",
+        foot: "",
+        buttons: [
+          { id: "close", label: "关闭", kind: "secondary" },
+          { id: "retry", label: "重试", kind: "primary" }
+        ]
+      };
+    }
+  };
+
+  /* ---------------- 渲染 ---------------- */
+
+  function send(action) {
+    if (bridge && typeof bridge.action === "function") {
+      bridge.action(action);
+      return;
+    }
+    if (action === "close" || action === "later" || action === "install-later") {
+      window.close();
+    }
+  }
+
+  function render() {
+    var view = (VIEWS[state.phase] || VIEWS.checking)(state);
+
+    headingEl.textContent = view.heading || "";
+    subEl.textContent = view.sub || "";
+    footEl.textContent = view.foot || "";
+    contentEl.innerHTML = view.content || "";
+
+    buttonsEl.innerHTML = "";
+    (view.buttons || []).forEach(function (def) {
+      var el = document.createElement("button");
+      el.className = "btn " + (def.kind || "secondary");
+      el.type = "button";
+      el.textContent = def.label;
+      el.addEventListener("click", function () { send(def.id); });
+      buttonsEl.appendChild(el);
+    });
+
+    // 重播淡入动画，让状态切换更自然
+    contentEl.classList.toggle("center", !!view.center);
+    contentEl.classList.remove("fade");
+    void contentEl.offsetWidth;
+    contentEl.classList.add("fade");
+  }
+
+  function apply(next) {
+    if (!next) return;
+    Object.keys(state).forEach(function (key) {
+      if (next[key] !== undefined) state[key] = next[key];
+    });
+    render();
+  }
+
+  // 内容区里带 data-action 的按钮（目前仅内部动作，不打开任何外部地址）
+  contentEl.addEventListener("click", function (event) {
+    var node = event.target;
+    while (node && node !== contentEl) {
+      var action = node.getAttribute && node.getAttribute("data-action");
+      if (action) { send(action); return; }
+      node = node.parentNode;
+    }
+  });
+
+  closeEl.addEventListener("click", function () { send("close"); });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") send("close");
+  });
+
+  /* ---------------- 预览模式（浏览器直接打开时使用） ---------------- */
+
+  function previewState() {
+    var base = {
+      appName: "dickson-color-studio",
+      currentVersion: "1.0.9",
+      version: "1.0.10",
+      releaseDate: "2026-11-20T10:00:00.000Z",
+      sizeBytes: 82 * 1048576,
+      lastCheckAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      sourceLabel: "腾讯云 COS",
+      probeMs: 412,
+      notes: "解决一些已知问题"
+    };
+    var match = /[?&]preview=([a-z-]+)/.exec(window.location.search);
+    var phase = match ? match[1] : "available";
+    if (phase === "downloading") {
+      base.percent = 46.8;
+      base.transferred = 38.3 * 1048576;
+      base.total = 82 * 1048576;
+      base.bytesPerSecond = 2.6 * 1048576;
+      base.remainingSeconds = 17;
+    }
+    if (phase === "error") base.message = "net::ERR_CONNECTION_TIMED_OUT（更新源无响应，请检查网络或代理设置）";
+    base.phase = phase;
+    return base;
+  }
+
+  if (bridge && typeof bridge.onState === "function") {
+    bridge.onState(function (next) { apply(next); });
+  } else {
+    // 未注入 preload（例如直接用浏览器打开做样式预览）
+    apply(previewState());
+  }
+})();
+</script>
+</body>
+</html>
