@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       new_tag:
-        description: "【应急手动】版本号，如 v1.x.x（正常由 A 仓库传入，留空则自动 +1）"
+        description: "【应急手动】版本号，如 v1.0.6（正常由 A 仓库传入，留空则自动 +1）"
         required: false
         default: ""
 
@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   build-release:
+    # 固定 windows-2022：windows-latest 现带的是 VS18(Insider)，node-gyp 10 无法识别
     runs-on: windows-2022
     permissions:
       contents: write
@@ -122,8 +123,12 @@ jobs:
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.VER;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           node -e "console.log('package.json version =', require('./package.json').version)"
 
-      - name: Electron 打包（NSIS maximum）
-        run: npm run package
+      - name: 移除明文主程序并打包（NSIS maximum）
+        shell: pwsh
+        run: |
+          # main.js 已编译进 app.jsc，生产包不保留明文源码（本地回退才需要它）
+          Remove-Item -Force -ErrorAction SilentlyContinue ./main.js
+          npm run package
 
       - name: 创建 Release 并上传产物
         uses: softprops/action-gh-release@v2
