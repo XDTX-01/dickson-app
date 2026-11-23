@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       new_tag:
-        description: "【应急手动】版本号，如 v1.0.6（正常由 A 仓库传入，留空则自动 +1）"
+        description: "【应急手动】版本号，如 v1.x.x（正常由 A 仓库传入，留空则自动 +1）"
         required: false
         default: ""
 
@@ -55,6 +55,18 @@ jobs:
 
       - name: 安装依赖
         run: npm ci
+
+      - name: 编译 C++ 原生保护模块（L3）
+        run: npm run build:native
+
+      - name: 放置原生模块产物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "./protect" | Out-Null
+          Copy-Item -Path "./protect/build/Release/protect.node" -Destination "./protect/protect.node" -Force
+
+      - name: 混淆并编译字节码（L1+L2）
+        run: npm run protect
 
       - name: 解析版本号（A 传入 > 手动输入 > 最新 Release 补丁+1）
         id: set_info
