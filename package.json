@@ -30,6 +30,7 @@
       "build-protect/**/*",
       "protect/**/*",
       "bootstrap.js",
+      "main.js",
       "src/**/*",
       "package.json",
       "!**/*.map",
