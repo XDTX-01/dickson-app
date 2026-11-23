@@ -20,8 +20,11 @@ if (!native) {
 // ------------------------- 生产模式 -------------------------
 const bytenode = require('bytenode');
 
-const jscPath = path.join(__dirname, 'build-protect', 'app.jsc');
-const sumPath = path.join(__dirname, 'build-protect', 'checksum.txt');
+// 原生 C++ 的 ifstream 无法透过 asar 虚拟文件系统读文件，
+// jsc / checksum 必须使用 app.asar.unpacked 里的真实磁盘路径
+const baseDir = path.join(__dirname, '..', 'app.asar.unpacked', 'build-protect');
+const jscPath = path.join(baseDir, 'app.jsc');
+const sumPath = path.join(baseDir, 'checksum.txt');
 
 function abort() {
     // 完整性校验失败：静默退出，不给篡改者留信息
