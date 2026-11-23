@@ -8,6 +8,14 @@ const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const os = require("os");
 const fs = require("fs/promises"); // 使用Promise版本的fs
+// 原生保护模块：过期判定、文件完整性自检（C++ 编译，无明文逻辑）
+// 本地开发（无编译产物）时降级为桩函数，保证 npm start 可直接跑；生产环境加载真实模块
+let native = null;
+try {
+  native = require("./protect/protect.node");
+} catch (_) {
+  native = { checkExpiry: () => 0, verifyFile: () => true };
+}
 
 // ------------------------- 常量与配置 -------------------------
 const CONSTANTS = {
@@ -20,10 +28,6 @@ const CONSTANTS = {
     ZOOM_RESET: "Ctrl+0",
   },
   ZOOM_LIMITS: { MIN: 0.5, MAX: 2.0 }, // 缩放限制
-  CONFIG: {
-    EXPIRE_DATE: new Date("2026-12-31"),
-    SELF_DESTRUCT: true,
-  },
 };
 
 // ------------------------- 工具函数 -------------------------
@@ -154,10 +158,7 @@ function createWindow() {
         enabled: false,
       },
       { label: `Version: ${appVersion}`, enabled: false },
-      {
-        label: `${getRemainingTime()} `,
-        enabled: false,
-      },
+      { label: "授权有效", enabled: false },
       {
         label: "检查更新",
         click: () => checkForUpdates(),
@@ -204,6 +205,76 @@ function applyFeedURL(source) {
   autoUpdater.setFeedURL(source);
 }
 
+// ------------------------- 下载进度窗 -------------------------
+let progressWin = null;
+
+function openProgressWindow(version) {
+  if (progressWin) return;
+  const parent = BrowserWindow.getAllWindows()[0];
+  progressWin = new BrowserWindow({
+    width: 440,
+    height: 215,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    parent: parent || undefined,
+    modal: !!parent,
+    title: "正在下载更新",
+    autoHideMenuBar: true,
+    webPreferences: { sandbox: true, contextIsolation: true },
+  });
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; padding: 26px 28px; }
+  .title { font-size: 15px; font-weight: 600; color: #1f2937; margin-bottom: 16px; }
+  .rack { height: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }
+  .bar { height: 100%; width: 0; background: #3b82f6; border-radius: 6px; transition: width .15s linear; }
+  .pct { font-size: 24px; font-weight: 700; color: #2563eb; margin-top: 14px; }
+  .info { font-size: 12px; color: #6b7280; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <div class="title">正在下载新版本 v__VER__ …</div>
+  <div class="rack"><div class="bar" id="bar"></div></div>
+  <div class="pct" id="pct">0.0%</div>
+  <div class="info" id="info"></div>
+</body>
+</html>`;
+  progressWin.loadURL(
+    "data:text/html;charset=utf-8," + encodeURIComponent(html.replace("__VER__", version || ""))
+  );
+  progressWin.on("closed", () => {
+    progressWin = null;
+  });
+}
+
+function setProgress(p) {
+  if (!progressWin || !p) return;
+  const pct = (p.percent || 0).toFixed(1);
+  const mb = (n) => ((n || 0) / 1048576).toFixed(1);
+  const speed = ((p.bytesPerSecond || 0) / 1024).toFixed(0);
+  progressWin.webContents
+    .executeJavaScript(
+      `document.getElementById("pct").textContent = "${pct}%";` +
+        `document.getElementById("bar").style.width = "${pct}%";` +
+        `document.getElementById("info").textContent = "${mb(p.transferred)} MB / ${mb(
+          p.total
+        )} MB · ${speed} KB/s";`
+    )
+    .catch(() => {});
+}
+
+function closeProgressWindow() {
+  if (progressWin) {
+    progressWin.close();
+    progressWin = null;
+  }
+}
+
 // 简单版本号比较：a>b 返回1，a<b 返回-1，相等返回0（支持 1.0.4 / 1.0.5 等）
 function compareVersions(a, b) {
   const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
@@ -230,18 +301,20 @@ function initAutoUpdater() {
   autoUpdater.on("update-available", (info) => {
     if (isProbing) return; // 探测阶段不弹窗
     updateCheckInProgress = false;
-    dialog.showMessageBox({
-      type: "info",
-      title: "检查更新",
-      message: `发现新版本 v${info.version}，正在后台下载，完成后会提示安装。`,
-    });
+    openProgressWindow(info.version); // 打开下载进度窗，后续由 download-progress 刷新
+  });
+  autoUpdater.on("download-progress", (p) => {
+    if (isProbing) return; // 探测阶段不刷新
+    setProgress(p);
   });
   autoUpdater.on("update-not-available", () => {
     if (isProbing) return; // 探测阶段不弹窗
     updateCheckInProgress = false;
+    closeProgressWindow();
     dialog.showMessageBox({ type: "info", title: "检查更新", message: "当前已是最新版本，无需更新。" });
   });
   autoUpdater.on("update-downloaded", (info) => {
+    closeProgressWindow();
     dialog
       .showMessageBox({
         type: "question",
@@ -259,6 +332,7 @@ function initAutoUpdater() {
   autoUpdater.on("error", (err) => {
     if (isProbing) return; // 探测阶段单个源失败，静默跳过，继续探测下一个源
     updateCheckInProgress = false;
+    closeProgressWindow();
     dialog.showErrorBox("更新失败", `检查更新时出错：${err && err.message ? err.message : err}`);
   });
 }
@@ -303,6 +377,7 @@ async function checkForUpdates() {
       await autoUpdater.checkForUpdates(); // 触发下载，进度与完成由事件处理
     } catch (e) {
       updateCheckInProgress = false;
+      closeProgressWindow();
       dialog.showErrorBox("更新失败", `检查更新时出错：${e && e.message ? e.message : e}`);
     }
   } else {
@@ -312,17 +387,7 @@ async function checkForUpdates() {
 }
 
 // ------------------------- 过期与自毁逻辑 -------------------------
-function getRemainingTime() {
-  const now = new Date();
-  const remainingMs = CONSTANTS.CONFIG.EXPIRE_DATE - now;
-  if (remainingMs <= 0) return 0; // 已到期，返回0分钟
-
-  return Math.floor(remainingMs / 60000); // 转换为分钟并取整
-}
-
 async function selfDestruct() {
-  if (!CONSTANTS.CONFIG.SELF_DESTRUCT) return;
-
   try {
     const appPath = path.dirname(app.getPath("exe"));
     const tempDir = os.tmpdir();
@@ -364,8 +429,8 @@ async function selfDestruct() {
 }
 
 function checkExpiration() {
-  const now = new Date();
-  if (now > CONSTANTS.CONFIG.EXPIRE_DATE) {
+  // 过期判定交给原生模块（C++），主进程里看不到判定逻辑
+  if (native.checkExpiry() === 1) {
     dialog.showErrorBox(
       "应用过期",
       "程序已超过有效期，即将自毁！\n\n剩余时间：0分钟"
