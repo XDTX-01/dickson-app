@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+<title>提示</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "PingFang SC", system-ui, sans-serif;
+    color: #101828; background: #ffffff; overflow: hidden; user-select: none; font-size: 13px;
+  }
+  .app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------- 自绘标题栏 ---------- */
+  .titlebar {
+    flex: 0 0 38px; height: 38px; display: flex; align-items: center;
+    padding: 0 4px 0 16px; background: #ffffff; border-bottom: 1px solid #eef1f5;
+    -webkit-app-region: drag;
+  }
+  .titlebar .name { font-size: 12px; color: #8b94a3; letter-spacing: .3px; }
+  .titlebar .spacer { flex: 1; }
+  .win-close {
+    width: 40px; height: 28px; border: 0; background: transparent; color: #6b7280;
+    font-size: 13px; line-height: 1; border-radius: 6px; cursor: pointer;
+    -webkit-app-region: no-drag; transition: background .15s, color .15s;
+  }
+  .win-close:hover { background: #ef4444; color: #ffffff; }
+
+  /* ---------- 内容 ---------- */
+  .body {
+    flex: 1 1 auto; min-height: 0; display: flex; gap: 14px;
+    padding: 22px 24px 6px; overflow-y: auto; -webkit-app-region: no-drag;
+  }
+  .badge {
+    flex: 0 0 38px; width: 38px; height: 38px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    color: #ffffff; font-size: 19px; font-weight: 700; margin-top: 1px;
+  }
+  .badge.error { background: #ef4444; box-shadow: 0 4px 12px rgba(239,68,68,.22); }
+  .badge.warning { background: #f59e0b; box-shadow: 0 4px 12px rgba(245,158,11,.22); }
+  .badge.info { background: #2563eb; box-shadow: 0 4px 12px rgba(37,99,235,.22); }
+  .text { min-width: 0; flex: 1; }
+  .text h1 { margin: 0 0 6px; font-size: 15.5px; font-weight: 600; line-height: 1.4; color: #0d1526; }
+  .text p {
+    margin: 0; font-size: 12.5px; line-height: 1.7; color: #475467;
+    white-space: pre-wrap; word-break: break-word; user-select: text;
+  }
+
+  /* ---------- 诊断列表（体检报告） ---------- */
+  .list { width: 100%; }
+  .summary { font-size: 15px; font-weight: 600; margin: 0 0 14px; line-height: 1.4; }
+  .summary.error { color: #ef4444; }
+  .summary.warning { color: #f59e0b; }
+  .summary.ok { color: #16a34a; }
+  .checks { display: flex; flex-direction: column; gap: 10px; }
+  .check {
+    display: flex; gap: 11px; padding: 11px 13px; border-radius: 10px; background: #f7f9fc;
+    border: 1px solid #eef1f5;
+  }
+  .cicon {
+    flex: 0 0 26px; width: 26px; height: 26px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: #ffffff; font-size: 14px; font-weight: 700; margin-top: 1px;
+  }
+  .cicon.error { background: #ef4444; }
+  .cicon.warning { background: #f59e0b; }
+  .cicon.ok { background: #16a34a; }
+  .cbody { min-width: 0; flex: 1; }
+  .ctitle { font-size: 13.5px; font-weight: 600; color: #0d1526; margin-bottom: 2px; line-height: 1.4; }
+  .cdetail { font-size: 12px; color: #475467; line-height: 1.6; }
+  .cfix { font-size: 11.5px; color: #8b94a3; margin-top: 3px; line-height: 1.6; }
+  .cfix::before { content: "建议："; }
+  .cfix:empty { display: none; }
+
+  /* ---------- 底部按钮 ---------- */
+  .footer {
+    flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 10px;
+    padding: 14px 24px 16px; border-top: 1px solid #f1f3f7; background: #ffffff;
+    -webkit-app-region: no-drag;
+  }
+  .btn {
+    height: 34px; padding: 0 18px; border-radius: 8px; border: 1px solid transparent;
+    cursor: pointer; font-family: inherit; font-size: 13px; letter-spacing: .2px;
+    transition: background .15s, border-color .15s, box-shadow .15s, transform .1s;
+  }
+  .btn.primary {
+    background: #2563eb; color: #ffffff; box-shadow: 0 4px 10px rgba(37,99,235,.22);
+  }
+  .btn.primary:hover { background: #1d4ed8; }
+  .btn.primary:active { transform: translateY(1px); box-shadow: none; }
+  .btn.secondary { background: #ffffff; border-color: #dfe4ea; color: #374151; }
+  .btn.secondary:hover { background: #f6f8fa; border-color: #cfd6de; }
+  .btn:focus-visible { outline: 2px solid rgba(37,99,235,.45); outline-offset: 1px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="titlebar">
+    <span class="name" id="title">提示</span>
+    <span class="spacer"></span>
+    <button class="win-close" id="winClose" title="关闭">✕</button>
+  </div>
+  <div class="body" id="body">
+    <div class="single" id="single">
+      <div class="badge info" id="badge">i</div>
+      <div class="text">
+        <h1 id="heading"></h1>
+        <p id="detail"></p>
+      </div>
+    </div>
+    <div class="list" id="list" style="display:none">
+      <div class="summary" id="summary"></div>
+      <div class="checks" id="checks"></div>
+    </div>
+  </div>
+  <div class="footer" id="buttons"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var titleEl = document.getElementById("title");
+  var singleEl = document.getElementById("single");
+  var listEl = document.getElementById("list");
+  var badgeEl = document.getElementById("badge");
+  var headingEl = document.getElementById("heading");
+  var detailEl = document.getElementById("detail");
+  var summaryEl = document.getElementById("summary");
+  var checksEl = document.getElementById("checks");
+  var buttonsEl = document.getElementById("buttons");
+  var closeEl = document.getElementById("winClose");
+
+  var bridge = window.dialogUI || null;
+
+  var ICONS = { error: "!", warning: "!", info: "i" };
+  var CHECK_ICONS = { error: "✕", warning: "!", ok: "✓" };
+
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  function send(index) {
+    if (bridge && typeof bridge.action === "function") bridge.action(index);
+  }
+
+  function renderButtons(buttons) {
+    buttonsEl.innerHTML = "";
+    if (!Array.isArray(buttons) || buttons.length === 0) {
+      buttons = [{ label: "确定", kind: "primary" }];
+    }
+    buttons.forEach(function (def, i) {
+      var el = document.createElement("button");
+      el.className = "btn " + (def.kind === "secondary" ? "secondary" : "primary");
+      el.type = "button";
+      el.textContent = def.label || ("按钮 " + (i + 1));
+      el.addEventListener("click", function () { send(i); });
+      buttonsEl.appendChild(el);
+    });
+  }
+
+  function renderChecks(checks) {
+    var errs = 0, warns = 0;
+    checks.forEach(function (c) {
+      if (c.level === "error") errs++;
+      else if (c.level === "warning") warns++;
+    });
+
+    if (errs > 0) {
+      summaryEl.className = "summary error";
+      summaryEl.textContent = "发现 " + errs + " 个问题" + (warns > 0 ? "，" + warns + " 项需要注意" : "");
+    } else if (warns > 0) {
+      summaryEl.className = "summary warning";
+      summaryEl.textContent = warns + " 项需要注意";
+    } else {
+      summaryEl.className = "summary ok";
+      summaryEl.textContent = "一切正常，未发现问题";
+    }
+
+    checksEl.innerHTML = "";
+    checks.forEach(function (c) {
+      var level = c.level === "error" || c.level === "warning" ? c.level : "ok";
+      var row = document.createElement("div");
+      row.className = "check";
+
+      var icon = document.createElement("div");
+      icon.className = "cicon " + level;
+      icon.textContent = CHECK_ICONS[level];
+
+      var body = document.createElement("div");
+      body.className = "cbody";
+
+      var title = document.createElement("div");
+      title.className = "ctitle";
+      title.textContent = c.title || "";
+
+      var detail = document.createElement("div");
+      detail.className = "cdetail";
+      detail.textContent = c.detail || "";
+
+      var fix = document.createElement("div");
+      fix.className = "cfix";
+      fix.textContent = c.fix || "";
+
+      body.appendChild(title);
+      body.appendChild(detail);
+      body.appendChild(fix);
+      row.appendChild(icon);
+      row.appendChild(body);
+      checksEl.appendChild(row);
+    });
+  }
+
+  function render(state) {
+    state = state || {};
+    titleEl.textContent = state.title || "提示";
+
+    if (Array.isArray(state.checks) && state.checks.length > 0) {
+      singleEl.style.display = "none";
+      listEl.style.display = "block";
+      renderChecks(state.checks);
+    } else {
+      listEl.style.display = "none";
+      singleEl.style.display = "flex";
+      var kind = state.kind === "error" || state.kind === "warning" ? state.kind : "info";
+      badgeEl.className = "badge " + kind;
+      badgeEl.textContent = ICONS[kind];
+      headingEl.textContent = state.message || "";
+      detailEl.textContent = state.detail || "";
+    }
+
+    renderButtons(state.buttons);
+  }
+
+  if (bridge && typeof bridge.onReady === "function") {
+    bridge.onReady(function (state) { render(state); });
+  } else {
+    render({ kind: "info", title: "提示", message: "弹窗预览", detail: "未注入 preload。" });
+  }
+
+  closeEl.addEventListener("click", function () { send(-1); });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") send(-1);
+  });
+})();
+</script>
+</body>
+</html>

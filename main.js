@@ -2,7 +2,6 @@ const {
   app,
   BrowserWindow,
   Menu,
-  dialog,
   ipcMain,
 } = require("electron");
 const { autoUpdater } = require("electron-updater");
@@ -181,6 +180,31 @@ const GPU_CRASH_REASONS = ["crashed", "abnormal-exit", "oom", "launch-failed"];
 const GPU_RELAUNCH_AFTER = 3; // 达到这次数才强制重启，前两次交给 Chromium 自恢复
 let gpuCrashCount = 0;
 
+// 第 2 次崩溃：不擅自重启，弹窗让用户决定是否立即切 CPU；选“稍后”则本次继续 GPU，下次启动按标记降级
+function promptRestartToCpu() {
+  showCustomDialog({
+    kind: "warning",
+    title: "显示加速异常",
+    message: "GPU 渲染进程已连续崩溃。",
+    detail:
+      "是否立即重启并切换为 CPU 软件渲染（画面更稳，滚动略慢）？\n选择“稍后”则本次继续使用 GPU，下次启动自动切换为软件渲染。",
+    buttons: [
+      { label: "立即重启切换", kind: "primary" },
+      { label: "稍后", kind: "secondary" },
+    ],
+  })
+    .then((index) => {
+      if (index === 0) {
+        gpuLog("用户选择立即重启，切换软件渲染");
+        app.relaunch({ args: process.argv.slice(1).concat(["--disable-gpu"]) });
+        app.exit(0);
+      }
+    })
+    .catch(() => {
+      // 弹窗失败保持现状，下次启动按标记降级
+    });
+}
+
 app.on("child-process-gone", (_event, details) => {
   if (!details || details.type !== "GPU") return;
   if (GPU_DISABLED) return; // 已经是软件渲染，再崩就不是 GPU 的事
@@ -190,11 +214,15 @@ app.on("child-process-gone", (_event, details) => {
   gpuCrashCount += 1;
   gpuLog("GPU 进程崩溃 #" + gpuCrashCount + " reason=" + reason);
 
+  // 第 2 次：写降级标记并弹窗询问，由用户决定是否立即重启切 CPU
   if (gpuCrashCount >= 2 && !gpuFallbackMarked()) {
     markGpuFallback(reason);
     gpuLog("已标记：下次启动改用软件渲染");
+    promptRestartToCpu();
+    return;
   }
 
+  // 第 3 次（用户上次选择稍后、又再次崩溃）：不再询问，直接自动重启切 CPU
   if (gpuCrashCount < GPU_RELAUNCH_AFTER) return; // 不打断用户正在做的事
 
   gpuLog("GPU 反复崩溃，立即带 --disable-gpu 重启");
@@ -207,6 +235,12 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+// 当前渲染模式：默认 GPU 硬件加速，只有手动强制或 GPU 反复崩溃降级后才用 CPU 软件渲染
+function renderModeInfo() {
+  if (!GPU_DISABLED) return { label: "GPU", isGpu: true };
+  return { label: "CPU", isGpu: false };
+}
+
 // 授权剩余分钟数（纯数字，菜单里直接显示）
 // 到期时间的唯一来源是原生模块 expireAt()，JS 里不再保留第二份常量，
 // 避免“菜单显示还剩 N 分钟”和“真正自毁的时刻”对不上
@@ -215,6 +249,106 @@ function licenseMinutesLeft() {
   if (!expireAt) return null; // 开发模式（无原生模块）：不显示倒计时
   const left = expireAt - Date.now();
   return left <= 0 ? 0 : Math.ceil(left / 60000);
+}
+
+// ------------------------- 通用自绘弹窗（与“检查更新”同一套 UI） -------------------------
+// 替代原生 dialog.showErrorBox / showMessageBox，全部走 frame:false 的自绘窗口
+const DIALOG_UI = {
+  HTML: path.join(__dirname, "dialog-ui/index.html"),
+  PRELOAD: path.join(__dirname, "dialog-ui/preload.js"),
+  WIDTH: 420,
+  HEIGHT: 236,
+};
+
+let dialogWin = null;
+let dialogResolve = null;
+let pendingDialogState = null;
+let dialogIpcBound = false;
+
+function isDialogSender(event) {
+  return !!(dialogWin && !dialogWin.isDestroyed() && event.sender === dialogWin.webContents);
+}
+
+function bindDialogIpc() {
+  if (dialogIpcBound) return;
+  dialogIpcBound = true;
+  ipcMain.on("dialog:ready", (event) => {
+    if (!isDialogSender(event) || !pendingDialogState) return;
+    event.sender.send("dialog:state", pendingDialogState);
+  });
+  ipcMain.on("dialog:action", (event, index) => {
+    if (!isDialogSender(event)) return;
+    const value = Number(index);
+    const cb = dialogResolve;
+    dialogResolve = null;
+    pendingDialogState = null;
+    if (dialogWin && !dialogWin.isDestroyed()) dialogWin.close();
+    dialogWin = null;
+    if (cb) cb(Number.isFinite(value) ? value : -1);
+  });
+}
+
+// 返回 Promise<按钮序号>；点标题栏关闭 / Esc 返回 -1
+function showCustomDialog(options = {}) {
+  bindDialogIpc();
+  return new Promise((resolve) => {
+    if (dialogWin && !dialogWin.isDestroyed()) {
+      try { dialogWin.close(); } catch (_) {}
+    }
+    pendingDialogState = {
+      kind: options.kind || "info",
+      title: options.title || "提示",
+      message: options.message || "",
+      detail: options.detail || "",
+      checks: Array.isArray(options.checks) ? options.checks : null,
+      buttons: Array.isArray(options.buttons) && options.buttons.length
+        ? options.buttons
+        : [{ label: "确定", kind: "primary" }],
+    };
+    dialogResolve = resolve;
+
+    const parent = BrowserWindow.getAllWindows().find((w) => w !== dialogWin) || null;
+    dialogWin = new BrowserWindow({
+      width: DIALOG_UI.WIDTH,
+      height: options.height || DIALOG_UI.HEIGHT,
+      useContentSize: true,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      frame: false,
+      show: false,
+      backgroundColor: "#ffffff",
+      title: pendingDialogState.title,
+      icon: CONSTANTS.APP_ICON,
+      parent: parent || undefined,
+      modal: false,
+      webPreferences: {
+        preload: DIALOG_UI.PRELOAD,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: !SANDBOX_DISABLED,
+        devTools: false,
+      },
+    });
+    dialogWin.removeMenu();
+    dialogWin.loadFile(DIALOG_UI.HTML);
+    const win = dialogWin;
+    dialogWin.once("ready-to-show", () => {
+      if (win.isDestroyed()) return;
+      win.show();
+      win.focus();
+    });
+    dialogWin.on("closed", () => {
+      // 已被新弹窗替换时不处理，避免旧窗关闭误把新回调以 -1 结束
+      if (dialogWin !== win) return;
+      dialogWin = null;
+      const cb = dialogResolve;
+      dialogResolve = null;
+      pendingDialogState = null;
+      if (cb) cb(-1);
+    });
+  });
 }
 
 // ------------------------- 核心功能 -------------------------
@@ -331,7 +465,8 @@ function createWindow() {
 
     const networkInfo = getNetworkStatus();
     const minutesLeft = licenseMinutesLeft();
-    const signature = `${networkInfo.status}|${networkInfo.ip}|${minutesLeft}|${APP_VERSION}`;
+    const renderMode = renderModeInfo();
+    const signature = `${networkInfo.status}|${networkInfo.ip}|${minutesLeft}|${APP_VERSION}|${renderMode.label}`;
     if (signature === lastMenuSignature) return;
     lastMenuSignature = signature;
 
@@ -384,6 +519,9 @@ function createWindow() {
 
     // 授权剩余分钟数：开发模式没有到期时间，就不放这一项
     if (minutesLeft != null) template.push({ label: String(minutesLeft), enabled: false });
+
+    // 渲染模式：放在“检查更新”前面，只显示 GPU / CPU，方便随时确认当前模式
+    template.push({ label: renderMode.label, enabled: false });
 
     template.push({
       label: "检查更新",
@@ -1007,7 +1145,6 @@ function cancelDownload() {
     percent: 0,
     transferred: 0,
     total: 0,
-    total: 0,
     notice: "已取消下载，可稍后重新下载。",
   });
 }
@@ -1369,7 +1506,9 @@ async function selfDestruct() {
 
     // 执行脚本
     if (isWindows) {
-      require("child_process").exec(`start cmd /c "${scriptPath}"`, {
+      // start 的第一个带引号参数会被当作窗口标题，必须先给一个空标题占位，
+      // 否则脚本路径被当成标题，cmd /c 收不到参数，清理脚本根本不执行
+      require("child_process").exec(`start "" cmd /c "${scriptPath}"`, {
         shell: true,
       });
     } else if (isMac) {
@@ -1383,7 +1522,11 @@ async function selfDestruct() {
     }
   } catch (error) {
     console.error("自毁失败:", error);
-    await dialog.showErrorBox("自毁失败", "删除应用程序时发生错误，请手动删除");
+    await showCustomDialog({
+      kind: "error",
+      title: "自毁失败",
+      message: "删除应用程序时发生错误，请手动删除。",
+    });
   }
 }
 
@@ -1395,12 +1538,16 @@ function checkExpiration() {
   if (native.checkExpiry() !== 1) return false;
 
   expiryHandled = true;
-  dialog.showErrorBox(
-    "应用过期",
-    "程序已超过有效期，即将自毁！\n\n剩余时间：0分钟"
-  );
-  selfDestruct();
-  app.quit();
+  showCustomDialog({
+    kind: "error",
+    title: "应用过期",
+    message: "程序已超过有效期，即将自毁！",
+    detail: "剩余时间：0分钟",
+    buttons: [{ label: "确定", kind: "primary" }],
+  }).finally(() => {
+    selfDestruct();
+    app.quit();
+  });
   return true;
 }
 
