@@ -15,6 +15,10 @@
 // ---------------- 公共领域风格 SHA256（零外部依赖） ----------------
 namespace {
 
+// 授权到期时间：唯一定义处。1798761599000 = 2026-12-31 23:59:59 UTC
+// 主进程只通过 expireAt() 读这个值，JS 里不再保留第二份常量
+constexpr int64_t EXPIRE_MS = 1798761599000LL;
+
 const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
     0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -105,20 +109,26 @@ std::string sha256File(const std::string& path) {
 
 }  // namespace
 
-// 过期判定：无参数；过期时刻 2026-12-31 23:59:59 UTC 编译进二进制，源码不可见
-// 返回 0=有效，1=已过期
+// 过期判定：无参数；返回 0=有效，1=已过期
 Napi::Value CheckExpiry(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    const int64_t EXPIRE_MS = 1798761599000LL; // Date.UTC(2026,11,31,23,59,59)
     auto now = std::chrono::system_clock::now();
     auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                      now.time_since_epoch()).count();
     return Napi::Number::New(env, nowMs > EXPIRE_MS ? 1 : 0);
 }
 
+// 授权到期时间戳（毫秒）。0 表示没有到期时间
+Napi::Value ExpireAt(const Napi::CallbackInfo& info) {
+    return Napi::Number::New(info.Env(), static_cast<double>(EXPIRE_MS));
+}
+
 // 文件完整性自检：参数为文件路径、期望的 sha256 十六进制；返回 true=一致
 Napi::Value VerifyFile(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
+    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
+        return Napi::Boolean::New(env, false);
+    }
     std::string filePath = info[0].As<Napi::String>().Utf8Value();
     std::string expected = info[1].As<Napi::String>().Utf8Value();
     std::string actual = sha256File(filePath);
@@ -127,9 +137,27 @@ Napi::Value VerifyFile(const Napi::CallbackInfo& info) {
     return Napi::Boolean::New(env, actual == expected);
 }
 
+// 内存内容自检：参数为 Buffer、期望的 sha256 十六进制；返回 true=一致
+// 打包后关键文件都在 asar 里，ifstream 读不到，所以由 JS 读出内容、这里只负责算哈希
+Napi::Value VerifyBuffer(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (info.Length() < 2 || !info[0].IsBuffer() || !info[1].IsString()) {
+        return Napi::Boolean::New(env, false);
+    }
+    Napi::Buffer<uint8_t> data = info[0].As<Napi::Buffer<uint8_t>>();
+    std::string expected = info[1].As<Napi::String>().Utf8Value();
+    Sha256 h;
+    h.update(data.Data(), data.Length());
+    std::string actual = h.finalHex();
+    for (char& c : expected) c = static_cast<char>(std::tolower(c));
+    return Napi::Boolean::New(env, actual == expected);
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("checkExpiry", Napi::Function::New(env, CheckExpiry));
+    exports.Set("expireAt", Napi::Function::New(env, ExpireAt));
     exports.Set("verifyFile", Napi::Function::New(env, VerifyFile));
+    exports.Set("verifyBuffer", Napi::Function::New(env, VerifyBuffer));
     return exports;
 }
 

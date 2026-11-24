@@ -73,8 +73,10 @@ npm run package
 - 更新内容固定显示为"解决一些已知问题"（不展示远端 `releaseNotes`，文案在 `main.js` 的 `UPDATE_NOTES_TEXT`）
 - "跳过此版本"会写入 `%APPDATA%/<应用名>/update-prefs.json`，之后静默检查不再提示该版本（手动检查仍会提示）
 - 下载进度同时同步到主窗口任务栏进度条
-- 菜单栏：已移除"开发者工具"条目，`Version:` 下一行直接显示**授权剩余分钟数**（纯数字，如 `1440`，每 5 秒刷新）
-  - 该数字由 `main.js` 的 `LICENSE_EXPIRE_MS` 计算，与 `protect/protect.cc` 里的 `EXPIRE_MS` 必须一致（当前 `1798761599000` = 2026-12-31 23:59:59）
+- 菜单栏：已移除"开发者工具"条目，`Version:` 下一行直接显示**授权剩余分钟数**（纯数字，如 `1440`）
+  - 该数字由原生模块的 `expireAt()` 计算，到期时间**只在** `protect/protect.cc` 里定义一处（`EXPIRE_MS`，当前 `1798761599000` = 2026-12-31 23:59:59 UTC），JS 侧不再保留第二份常量，改时间只改一处
+  - 菜单只在显示内容（IP / 剩余分钟 / 版本）变化时才重建，不会每 5 秒把用户正在打开的菜单关掉
+  - 运行期间每 60 秒复查一次到期时间，软件挂着跨过到期点同样会触发，而不是只在启动时判一次
 - 更新源为 GitHub Releases + 腾讯云 COS，**两个源同时并发探测**（每个源一个独立 updater 实例）
   - 单源探测超时 15 秒，慢源/被墙源不会拖住整体：总耗时 ≈ 最慢的那个源，而不是两个源相加
   - 版本号优先；版本相同时选响应更快的源（通常也下载更快），界面会显示该源响应耗时
@@ -88,4 +90,12 @@ $env:DICKSON_UPDATE_DEMO="1"; npm start
 ```
 
 也可以直接用浏览器打开 `update-ui/index.html?preview=available`（可选 `downloading` / `ready` / `latest` / `error` / `checking`）看样式。
+
+## 六、完整性校验与沙箱
+
+- `npm run protect` 除了混淆 `app.js`，还会生成 `build-protect/manifest.json`，把 `build-protect/app.js`、`src/index.html`、`src/preload.js`、`update-ui/index.html`、`update-ui/preload.js`、`package.json` 的 sha256 全部登记进去；启动时 `bootstrap.js` 逐文件比对，任何一个被改过就直接退出（以前只校验 `app.js`，改界面 HTML 完全发现不了）
+- 文件放在 asar 里，C++ 的 ifstream 读不到，所以改由 Node 读出内容交给原生模块 `verifyBuffer()` 算哈希
+- 渲染进程沙箱默认开启；只有确认被策略禁用的环境才用 `DICKSON_NO_SANDBOX=1` 关闭，不要无条件加 `--no-sandbox`
+- 安装包目前**没有代码签名**。要过 SmartScreen 并真正挡住 asar 被整体替换，需要在 CI 里配置 `CSC_LINK`（证书 p12 的 base64 或路径）和 `CSC_KEY_PASSWORD` 环境变量，electron-builder 会自动签名；没有证书时这一步只能先空着
+
 

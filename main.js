@@ -11,14 +11,25 @@ const os = require("os");
 const fs = require("fs/promises"); // 使用Promise版本的fs
 // 原生保护模块：过期判定、文件完整性自检（C++ 编译，无明文逻辑）
 // 本地开发（无编译产物）时降级为桩函数，保证 npm start 可直接跑；生产环境加载真实模块
-// 部分受限环境（沙箱代理被策略禁用）渲染进程会直接崩溃，关闭沙箱保证可运行
-app.commandLine.appendSwitch("no-sandbox");
 app.disableHardwareAcceleration(); // 部分机器 GPU 初始化导致渲染进程崩溃，关闭硬加速
+
+// 渲染进程沙箱默认保持开启（与下方 webPreferences.sandbox = true 一致）。
+// 以前这里无条件 appendSwitch("no-sandbox")，等于把沙箱整体关掉，sandbox:true 形同虚设。
+// 只有确实被策略禁用的受限环境才显式关闭：启动前设置 DICKSON_NO_SANDBOX=1
+if (process.env.DICKSON_NO_SANDBOX === "1") {
+  app.commandLine.appendSwitch("no-sandbox");
+}
+
 let native = null;
 try {
   native = require("./protect/protect.node");
 } catch (_) {
-  native = { checkExpiry: () => 0, verifyFile: () => true };
+  native = {
+    checkExpiry: () => 0, // 开发模式：永不过期
+    expireAt: () => 0, // 0 = 没有到期时间，菜单里不显示倒计时
+    verifyFile: () => true,
+    verifyBuffer: () => true,
+  };
 }
 
 // ------------------------- 常量与配置 -------------------------
@@ -33,16 +44,40 @@ const CONSTANTS = {
   ZOOM_LIMITS: { MIN: 0.5, MAX: 2.0 }, // 缩放限制
 };
 
+// 菜单刷新间隔：内容（IP / 到期分钟数 / 版本）没变就不会真的重建菜单
+const MENU_REFRESH_MS = 30 * 1000;
+// 运行期间复查到期时间的间隔：只在启动时判一次的话，挂机跨过到期点不会触发
+const EXPIRY_CHECK_INTERVAL = 60 * 1000;
+
+let mainWin = null; // 主窗口引用（second-instance 用，避免误取更新窗口）
+let menuTimer = null;
+let lastMenuSignature = "";
+
+function clearMenuTimer() {
+  if (menuTimer) {
+    clearInterval(menuTimer);
+    menuTimer = null;
+  }
+}
+
+function startMenuTimer(fn) {
+  clearMenuTimer();
+  menuTimer = setInterval(fn, MENU_REFRESH_MS);
+  if (typeof menuTimer.unref === "function") menuTimer.unref();
+}
+
 // ------------------------- 工具函数 -------------------------
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
 // 授权剩余分钟数（纯数字，菜单里直接显示）
-// 过期时刻与 protect/protect.cc 里的 EXPIRE_MS 必须一致：1798761599000 = 2026-12-31 23:59:59
-const LICENSE_EXPIRE_MS = 1798761599000;
+// 到期时间的唯一来源是原生模块 expireAt()，JS 里不再保留第二份常量，
+// 避免“菜单显示还剩 N 分钟”和“真正自毁的时刻”对不上
 function licenseMinutesLeft() {
-  const left = LICENSE_EXPIRE_MS - Date.now();
+  const expireAt = typeof native.expireAt === "function" ? native.expireAt() : 0;
+  if (!expireAt) return null; // 开发模式（无原生模块）：不显示倒计时
+  const left = expireAt - Date.now();
   return left <= 0 ? 0 : Math.ceil(left / 60000);
 }
 
@@ -54,20 +89,9 @@ if (!gotTheLock) {
   return; // 未拿到锁立即终止，避免继续注册窗口与事件
 }
 
-// 获取应用版本（Promise化）
-async function getAppVersion() {
-  try {
-    const data = await fs.readFile(
-      path.join(__dirname, "package.json"),
-      "utf8"
-    );
-    const packageJson = JSON.parse(data);
-    return packageJson.version;
-  } catch (err) {
-    console.error("读取版本失败:", err);
-    return "未知版本";
-  }
-}
+// 应用版本：app.getVersion() 启动时读一次 package.json 并缓存结果，
+// 不再每次刷新菜单都重新读盘 + JSON.parse
+const APP_VERSION = app.getVersion() || "未知版本";
 
 // 获取网络状态
 function getNetworkStatus() {
@@ -100,21 +124,36 @@ function createWindow() {
     },
   });
 
+  mainWin = win;
+  lastMenuSignature = ""; // 新窗口要按新引用重建一次菜单（旧菜单的点击回调指向已销毁的窗口）
+  win.on("closed", () => {
+    if (mainWin === win) mainWin = null;
+    clearMenuTimer(); // 窗口关掉后不再让旧定时器持有已销毁的窗口
+  });
+
   win.loadFile(CONSTANTS.INDEX_HTML);
 
   // 快捷键统一由下方应用菜单的 accelerator 提供（仅在本应用内生效），
   // 不再使用 globalShortcut，避免拦截系统及其他应用的全局按键。
 
   // 开发者工具已关闭，这里再屏蔽一次唤出快捷键（F12 / Ctrl+Shift+I·J·C）
+  // 同时记录 Ctrl 键状态：webContents 的 mouse-wheel 事件参数里没有 ctrlKey，
+  // 原来直接读 event.ctrlKey 永远是 undefined，Ctrl+滚轮缩放其实一直不生效
+  let ctrlDown = false;
   win.webContents.on("before-input-event", (event, input) => {
     const key = String(input.key || "").toLowerCase();
+    if (key === "control") ctrlDown = input.type !== "keyUp";
     if (key === "f12" || (input.control && input.shift && (key === "i" || key === "j" || key === "c"))) {
       event.preventDefault();
     }
   });
+  win.on("blur", () => {
+    ctrlDown = false; // 焦点离开后按键状态不再可信
+  });
 
   // 优化后的缩放逻辑（带限制）
   function handleZoom(delta = 0.1) {
+    if (win.isDestroyed()) return;
     const current = win.webContents.getZoomFactor();
     win.webContents.setZoomFactor(
       clamp(
@@ -125,12 +164,16 @@ function createWindow() {
     );
   }
 
-  // 菜单更新（Promise化）
-  async function updateMenu() {
-    const [networkInfo, appVersion] = await Promise.all([
-      Promise.resolve(getNetworkStatus()),
-      getAppVersion(),
-    ]);
+  // 菜单更新：只在显示内容变化时才真的重建。
+  // 以前每 5 秒无条件 setApplicationMenu，用户正打开的菜单会被直接关掉、甚至点空。
+  function updateMenu() {
+    if (win.isDestroyed()) return;
+
+    const networkInfo = getNetworkStatus();
+    const minutesLeft = licenseMinutesLeft();
+    const signature = `${networkInfo.status}|${networkInfo.ip}|${minutesLeft}|${APP_VERSION}`;
+    if (signature === lastMenuSignature) return;
+    lastMenuSignature = signature;
 
     const template = [
       {
@@ -149,7 +192,9 @@ function createWindow() {
           {
             label: "刷新",
             accelerator: CONSTANTS.SHORTCUTS.REFRESH,
-            click: () => win.reload(),
+            click: () => {
+              if (!win.isDestroyed()) win.reload();
+            },
           },
           {
             label: "放大",
@@ -164,7 +209,9 @@ function createWindow() {
           {
             label: "重置缩放",
             accelerator: CONSTANTS.SHORTCUTS.ZOOM_RESET,
-            click: () => win.webContents.setZoomFactor(1),
+            click: () => {
+              if (!win.isDestroyed()) win.webContents.setZoomFactor(1);
+            },
           },
         ],
       },
@@ -172,27 +219,29 @@ function createWindow() {
         label: `网络状态: ${networkInfo.status}，本机 IP: ${networkInfo.ip}`,
         enabled: false,
       },
-      { label: `Version: ${appVersion}`, enabled: false },
-      { label: String(licenseMinutesLeft()), enabled: false },
-      {
-        label: "检查更新",
-        click: () => openUpdateCenter(),
-      },
+      { label: `Version: ${APP_VERSION}`, enabled: false },
     ];
+
+    // 授权剩余分钟数：开发模式没有到期时间，就不放这一项
+    if (minutesLeft != null) template.push({ label: String(minutesLeft), enabled: false });
+
+    template.push({
+      label: "检查更新",
+      click: () => openUpdateCenter(),
+    });
 
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
-  // 初始化及定时更新（倒计时需周期性刷新）
+  // 初始化及定时刷新：分钟数每分钟才变一次，30 秒检查一次足够
   updateMenu();
-  setInterval(updateMenu, 5000);
+  startMenuTimer(updateMenu);
 
-  // 鼠标滚轮缩放（带Ctrl键检测）
-  win.webContents.on("mouse-wheel", (event, _, deltaY) => {
-    if (event.ctrlKey) {
-      event.preventDefault();
-      handleZoom(deltaY > 0 ? 0.1 : -0.1);
-    }
+  // 鼠标滚轮缩放：按住 Ctrl 时缩放，Ctrl 状态由上面的 before-input-event 维护
+  win.webContents.on("mouse-wheel", (event, deltaX, deltaY) => {
+    if (!ctrlDown) return;
+    event.preventDefault();
+    handleZoom(deltaY > 0 ? 0.1 : -0.1);
   });
 
   return win; // 返回窗口引用以便后续操作
@@ -632,12 +681,22 @@ async function handleUpdateAction(action) {
   }
 }
 
+// 只受理“更新窗口自己”发来的 IPC：主窗口的页面是外部构建产物，
+// 万一被注入脚本，也不能凭 send("update:action", "restart-install") 之类触发下载/安装
+function isUpdateSender(event) {
+  return !!(updateWin && !updateWin.isDestroyed() && event.sender === updateWin.webContents);
+}
+
 function bindUpdateIpc() {
   if (updateIpcBound) return;
   updateIpcBound = true;
-  ipcMain.on("update:ready", () => pushState());
-  ipcMain.on("update:action", (_event, action) => {
-    handleUpdateAction(String(action || ""));
+  ipcMain.on("update:ready", (event) => {
+    if (!isUpdateSender(event)) return;
+    pushState();
+  });
+  ipcMain.on("update:action", (event, action) => {
+    if (!isUpdateSender(event)) return;
+    Promise.resolve(handleUpdateAction(String(action || ""))).catch(() => {});
   });
 }
 
@@ -645,6 +704,8 @@ function bindUpdateIpc() {
 function startDownload(options) {
   const opts = options || {};
   if (!pendingUpdate || downloadInFlight) return;
+
+  readyUpdate = null; // 新一轮下载开始，之前“已就绪”的结果作废
 
   if (pendingUpdate.demo) {
     runDemoDownload();
@@ -861,6 +922,32 @@ async function runUpdateCheck(options) {
     const best = candidates[0];
     lastCandidates = candidates;
 
+    // 已经下载到本地的更新：这一轮没查到更高版本就别把界面退回“发现新版”。
+    // 否则用户得把同一个包再下一遍，而 readyUpdate 一直存在又会让菜单“检查更新”永远只弹旧窗口。
+    if (readyUpdate) {
+      const readyVersion = String(
+        readyUpdate.version || (pendingUpdate && pendingUpdate.version) || ""
+      );
+      if (readyVersion && compareVersions(best.info.version, readyVersion) <= 0) {
+        activeSource = best.source;
+        patchState({
+          phase: "ready",
+          version: readyVersion,
+          currentVersion: localVersion,
+          percent: 100,
+          lastCheckAt: checkedAt,
+          sourceLabel: sourceLabel(best.source),
+          probeMs: best.elapsed,
+          message: "",
+          notice: "",
+        });
+        if (!silent && !checkDismissed) openUpdateWindow();
+        return;
+      }
+      // 确实有更高版本：旧的已下载包作废，走正常的“发现新版”流程
+      readyUpdate = null;
+    }
+
     if (compareVersions(best.info.version, localVersion) <= 0) {
       patchState({
         phase: "latest",
@@ -918,6 +1005,11 @@ function openUpdateCenter() {
   const phase = getState().phase;
   if (downloadInFlight || readyUpdate) {
     openUpdateWindow();
+    // “已就绪”时顺手在后台再查一次：有更高版本会直接切成“发现新版”，
+    // 没有就保持“已就绪”，避免下载过一次之后菜单里的检查更新永远形同虚设
+    if (readyUpdate && phase === "ready" && !isChecking) {
+      runUpdateCheck({ silent: true }).catch(() => {});
+    }
     return;
   }
   if (updateWin && !updateWin.isDestroyed() && phase !== "latest" && phase !== "error") {
@@ -1134,38 +1226,50 @@ async function selfDestruct() {
   }
 }
 
+let expiryHandled = false;
+
 function checkExpiration() {
+  if (expiryHandled) return true;
   // 过期判定交给原生模块（C++），主进程里看不到判定逻辑
-  if (native.checkExpiry() === 1) {
-    dialog.showErrorBox(
-      "应用过期",
-      "程序已超过有效期，即将自毁！\n\n剩余时间：0分钟"
-    );
-    selfDestruct();
-    app.quit();
-    return true;
-  }
-  return false;
+  if (native.checkExpiry() !== 1) return false;
+
+  expiryHandled = true;
+  dialog.showErrorBox(
+    "应用过期",
+    "程序已超过有效期，即将自毁！\n\n剩余时间：0分钟"
+  );
+  selfDestruct();
+  app.quit();
+  return true;
+}
+
+// 运行期间定期复查：只在启动时判一次的话，软件挂着不退出、跨过到期点也不会触发
+function startExpiryWatch() {
+  const timer = setInterval(() => {
+    checkExpiration();
+  }, EXPIRY_CHECK_INTERVAL);
+  if (typeof timer.unref === "function") timer.unref();
 }
 
 // ------------------------- 应用生命周期 -------------------------
 app.whenReady().then(() => {
   if (checkExpiration()) return;
+  startExpiryWatch(); // 运行中也要定期复查到期时间
   initAutoUpdater();
-  const mainWindow = createWindow();
+  createWindow();
   scheduleStartupCheck(); // 启动后后台静默检查一次，有新版才弹窗
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (!mainWin || mainWin.isDestroyed()) createWindow();
   });
 
-  // 处理第二个实例启动
-  app.on("second-instance", (_, __, ___) => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      win.isMinimized() ? win.restore() : null;
-      win.focus();
-    }
+  // 处理第二个实例启动：用保存的主窗口引用，不会误把更新窗口拉到前台
+  app.on("second-instance", () => {
+    const win = mainWin;
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
   });
 });
 
