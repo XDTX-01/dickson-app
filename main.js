@@ -11,7 +11,8 @@ const os = require("os");
 const fs = require("fs/promises"); // 使用Promise版本的fs
 // 原生保护模块：过期判定、文件完整性自检（C++ 编译，无明文逻辑）
 // 本地开发（无编译产物）时降级为桩函数，保证 npm start 可直接跑；生产环境加载真实模块
-app.disableHardwareAcceleration(); // 部分机器 GPU 初始化导致渲染进程崩溃，关闭硬加速
+// 硬件加速默认开启（GPU 合成，滚动/材质缩略图/高分屏更顺），
+// 少数机器 GPU 驱动有问题会让 GPU 进程崩溃，降级策略见下方「硬件加速与自动降级」一节
 
 // 渲染进程沙箱默认保持开启（与下方 webPreferences.sandbox = true 一致）。
 // 少数机器（安全软件/代理策略禁用沙箱）会让渲染进程一启动就崩，所以保留三条降级通道：
@@ -115,6 +116,89 @@ app.on("render-process-gone", (_event, _webContents, details) => {
   console.warn("[sandbox] 渲染进程异常退出（" + reason + "），改用 --no-sandbox 重启");
   markNoSandboxFallback();
   app.relaunch({ args: process.argv.slice(1).concat(["--no-sandbox"]) });
+  app.exit(0);
+});
+
+// ------------------------- 硬件加速（GPU）与自动降级 -------------------------
+// 默认开启硬件加速：滚动、材质缩略图、高分屏缩放都靠 GPU 合成，关掉会明显卡 CPU。
+// 少数机器 GPU 驱动有问题会让 GPU 进程崩溃，这里不做"一次就降级"，而是分级处理：
+//   本会话第 1 次 GPU 崩溃 → 只记日志（Chromium 自己能重建 GPU 进程，用户无感）
+//   第 2 次                → 写永久标记，下次启动直接软件渲染
+//   第 3 次                → 立刻带 --disable-gpu 重启，不再让用户对着花屏等
+// 想强制恢复硬件加速：设环境变量 DICKSON_GPU=1，或删掉 userData/gpu-fallback.json
+const gpuFs = require("fs"); // 本段自包含：只用同步 fs，不依赖文件其它位置的定义
+
+function gpuFallbackFile() {
+  return path.join(app.getPath("userData"), "gpu-fallback.json");
+}
+
+function gpuFallbackMarked() {
+  try {
+    return gpuFs.existsSync(gpuFallbackFile());
+  } catch (_) {
+    return false;
+  }
+}
+
+function gpuLog(text) {
+  try {
+    const dir = path.join(app.getPath("userData"), "logs");
+    gpuFs.mkdirSync(dir, { recursive: true });
+    gpuFs.appendFileSync(
+      path.join(dir, "gpu.log"),
+      "[" + new Date().toISOString() + "] " + text + "\n",
+      "utf8"
+    );
+  } catch (_) {
+    // 日志失败不影响降级判断
+  }
+}
+
+function markGpuFallback(reason) {
+  try {
+    gpuFs.writeFileSync(
+      gpuFallbackFile(),
+      JSON.stringify({ lastAt: Date.now(), reason: String(reason || "") }, null, 2),
+      "utf8"
+    );
+  } catch (_) {
+    // 写不进去就只靠本次 relaunch 的 --disable-gpu 参数生效
+  }
+}
+
+const GPU_DISABLED =
+  process.env.DICKSON_NO_GPU === "1" ||
+  process.argv.indexOf("--disable-gpu") !== -1 ||
+  app.commandLine.hasSwitch("disable-gpu") ||
+  (process.env.DICKSON_GPU !== "1" && gpuFallbackMarked());
+
+if (GPU_DISABLED) {
+  app.disableHardwareAcceleration();
+  gpuLog("本次启动使用软件渲染（环境变量或历史崩溃标记）");
+}
+
+const GPU_CRASH_REASONS = ["crashed", "abnormal-exit", "oom", "launch-failed"];
+const GPU_RELAUNCH_AFTER = 3; // 达到这次数才强制重启，前两次交给 Chromium 自恢复
+let gpuCrashCount = 0;
+
+app.on("child-process-gone", (_event, details) => {
+  if (!details || details.type !== "GPU") return;
+  if (GPU_DISABLED) return; // 已经是软件渲染，再崩就不是 GPU 的事
+  const reason = String(details.reason || "");
+  if (GPU_CRASH_REASONS.indexOf(reason) === -1) return;
+
+  gpuCrashCount += 1;
+  gpuLog("GPU 进程崩溃 #" + gpuCrashCount + " reason=" + reason);
+
+  if (gpuCrashCount >= 2 && !gpuFallbackMarked()) {
+    markGpuFallback(reason);
+    gpuLog("已标记：下次启动改用软件渲染");
+  }
+
+  if (gpuCrashCount < GPU_RELAUNCH_AFTER) return; // 不打断用户正在做的事
+
+  gpuLog("GPU 反复崩溃，立即带 --disable-gpu 重启");
+  app.relaunch({ args: process.argv.slice(1).concat(["--disable-gpu"]) });
   app.exit(0);
 });
 
@@ -922,6 +1006,7 @@ function cancelDownload() {
     phase: "available",
     percent: 0,
     transferred: 0,
+    total: 0,
     total: 0,
     notice: "已取消下载，可稍后重新下载。",
   });
