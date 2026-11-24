@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const Module = require('module');
-const { app } = require('electron');
+const { app, dialog } = require('electron');
 
 let native = null;
 try {
@@ -28,30 +28,55 @@ const unpackedDir = path.join(__dirname, '..', 'app.asar.unpacked', 'build-prote
 const manifestPath = path.join(unpackedDir, 'manifest.json');
 const appPath = path.join(unpackedDir, 'app.js');
 
-function abort() {
-    // 完整性校验失败：静默退出，不给篡改者留信息
+// 校验失败：对篡改者只说“校验失败”，明细只写本地日志；
+// 但不再静默退出——双击了没反应比弹出提示更让人抓狂
+function abort(reason) {
+    const detail = String(reason || 'unknown');
+    try {
+        const logDir = path.join(app.getPath('userData'), 'logs');
+        fs.mkdirSync(logDir, { recursive: true });
+        fs.appendFileSync(
+            path.join(logDir, 'integrity.log'),
+            '[' + new Date().toISOString() + '] ' + detail + '\n',
+            'utf8'
+        );
+    } catch (_) {
+        // 日志写不进去不影响退出流程
+    }
+    try {
+        dialog.showErrorBox(
+            '无法启动',
+            '程序文件校验失败或已被修改，请重新安装最新版本。\n如反复出现，请联系客服并提供日志。'
+        );
+    } catch (_) {
+        // 极少数环境在 ready 之前不允许弹窗，忽略
+    }
     process.exit(1);
 }
 
 // 老版本原生模块没有 verifyBuffer，能力不齐就没有校验意义
-if (typeof native.verifyBuffer !== 'function' || typeof native.verifyFile !== 'function') abort();
+if (typeof native.verifyBuffer !== 'function' || typeof native.verifyFile !== 'function') {
+    abort('native 模块缺少 verifyBuffer / verifyFile');
+}
 
-if (!fs.existsSync(manifestPath) || !fs.existsSync(appPath)) abort();
+if (!fs.existsSync(manifestPath) || !fs.existsSync(appPath)) {
+    abort('manifest.json 或 app.js 不存在');
+}
 
 let manifest = null;
 try {
     manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 } catch (_) {
-    abort();
+    abort('manifest.json 解析失败');
 }
 
 const expectedFiles = (manifest && manifest.files) || {};
 const entries = Object.keys(expectedFiles);
-if (entries.length === 0) abort();
+if (entries.length === 0) abort('manifest.json 未登记任何文件');
 
 for (const rel of entries) {
     const expected = String(expectedFiles[rel] || '');
-    if (!expected) abort();
+    if (!expected) abort('校验清单内容为空: ' + rel);
 
     // build-protect 下的文件在 asarUnpack 的真实目录，其余文件按 asar 根目录解析
     const abs = rel.indexOf('build-protect/') === 0
@@ -62,9 +87,9 @@ for (const rel of entries) {
     try {
         content = fs.readFileSync(abs);
     } catch (_) {
-        abort();
+        abort('读取失败: ' + rel);
     }
-    if (!native.verifyBuffer(content, expected)) abort();
+    if (!native.verifyBuffer(content, expected)) abort('校验不一致: ' + rel);
 }
 
 // 以 asar 根目录作为模块 __dirname 编译执行，保证 main.js 内的相对路径（src/、package.json）正确

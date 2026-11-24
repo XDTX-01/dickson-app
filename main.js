@@ -14,9 +14,15 @@ const fs = require("fs/promises"); // 使用Promise版本的fs
 app.disableHardwareAcceleration(); // 部分机器 GPU 初始化导致渲染进程崩溃，关闭硬加速
 
 // 渲染进程沙箱默认保持开启（与下方 webPreferences.sandbox = true 一致）。
-// 以前这里无条件 appendSwitch("no-sandbox")，等于把沙箱整体关掉，sandbox:true 形同虚设。
-// 只有确实被策略禁用的受限环境才显式关闭：启动前设置 DICKSON_NO_SANDBOX=1
-if (process.env.DICKSON_NO_SANDBOX === "1") {
+// 少数机器（安全软件/代理策略禁用沙箱）会让渲染进程一启动就崩，所以保留三条降级通道：
+//   1) 崩溃自动降级：渲染进程异常退出后用 --no-sandbox 重启一次（10 分钟内只降级一次，防死循环）
+//   2) 环境变量 DICKSON_NO_SANDBOX=1
+//   3) 快捷方式/命令行加 --no-sandbox
+const SANDBOX_DISABLED =
+  process.env.DICKSON_NO_SANDBOX === "1" ||
+  process.argv.indexOf("--no-sandbox") !== -1;
+
+if (SANDBOX_DISABLED) {
   app.commandLine.appendSwitch("no-sandbox");
 }
 
@@ -65,6 +71,51 @@ function startMenuTimer(fn) {
   menuTimer = setInterval(fn, MENU_REFRESH_MS);
   if (typeof menuTimer.unref === "function") menuTimer.unref();
 }
+
+// ------------------------- 沙箱降级兜底 -------------------------
+// 只在“渲染进程真的崩了”的时候才降级，且同一台机器 10 分钟内只降一次，
+// 避免因为别的原因（OOM、被杀进程）反复重启。
+const fsSync = require("fs");
+
+function sandboxFallbackFile() {
+  return path.join(app.getPath("userData"), "sandbox-fallback.json");
+}
+
+function canFallbackToNoSandbox() {
+  try {
+    const state = JSON.parse(fsSync.readFileSync(sandboxFallbackFile(), "utf8"));
+    return Date.now() - (Number(state.lastAt) || 0) > 10 * 60 * 1000;
+  } catch (_) {
+    return true;
+  }
+}
+
+function markNoSandboxFallback() {
+  try {
+    fsSync.mkdirSync(path.dirname(sandboxFallbackFile()), { recursive: true });
+    fsSync.writeFileSync(
+      sandboxFallbackFile(),
+      JSON.stringify({ lastAt: Date.now() }, null, 2),
+      "utf8"
+    );
+  } catch (_) {
+    // 写不进去只影响“防循环”这一层，不影响重启本身
+  }
+}
+
+const SANDBOX_CRASH_REASONS = ["crashed", "launch-failed", "integrity-failure"];
+
+app.on("render-process-gone", (_event, _webContents, details) => {
+  const reason = (details && details.reason) || "";
+  if (SANDBOX_DISABLED) return; // 已经是关沙箱在跑，再崩就不是沙箱的事了
+  if (SANDBOX_CRASH_REASONS.indexOf(reason) === -1) return;
+  if (!canFallbackToNoSandbox()) return;
+
+  console.warn("[sandbox] 渲染进程异常退出（" + reason + "），改用 --no-sandbox 重启");
+  markNoSandboxFallback();
+  app.relaunch({ args: process.argv.slice(1).concat(["--no-sandbox"]) });
+  app.exit(0);
+});
 
 // ------------------------- 工具函数 -------------------------
 function clamp(value, min, max) {
@@ -119,7 +170,7 @@ function createWindow() {
       preload: CONSTANTS.PRELOAD_SCRIPT,
       contextIsolation: true, // 渲染进程与 preload 隔离，防止页面直接触碰 Node
       nodeIntegration: false, // 禁止页面使用 Node API
-      sandbox: true, // 启用渲染进程沙箱
+      sandbox: !SANDBOX_DISABLED, // 默认开启；降级模式（崩溃重启/环境变量）下必须同步关掉，否则与命令行矛盾
       devTools: false, // 不提供开发者工具（避免通过 devtools 看到更新源等内部地址）
     },
   });
@@ -132,6 +183,30 @@ function createWindow() {
   });
 
   win.loadFile(CONSTANTS.INDEX_HTML);
+
+  // 页面加载失败时不要留一个纯白窗口（本地漏放 src/index.html、文件损坏都属于这种情况）
+  let loadFailShown = false;
+  win.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, _validatedURL, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3 || loadFailShown) return; // -3 = 主动取消，忽略
+      loadFailShown = true;
+      const html =
+        '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>页面加载失败</title>' +
+        '<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;' +
+        'background:#f7f9fc;color:#101828;font-family:"Microsoft YaHei UI","Segoe UI",sans-serif}' +
+        '.box{max-width:520px;padding:28px 32px;background:#fff;border:1px solid #e8edf5;border-radius:12px;' +
+        'box-shadow:0 8px 24px rgba(16,24,40,.06)}h1{margin:0 0 10px;font-size:17px}' +
+        'p{margin:6px 0;font-size:13px;line-height:1.7;color:#475467}code{background:#f2f5f9;' +
+        'padding:1px 5px;border-radius:4px;font-size:12px}</style></head><body><div class="box">' +
+        "<h1>页面加载失败</h1>" +
+        "<p>错误码：" + errorCode + "（" + errorDescription + "）</p>" +
+        "<p>本地开发：请先把前端构建产物（<code>dist</code> 里的内容）放进 <code>src/</code> 目录。</p>" +
+        "<p>正式版本：安装文件可能不完整，请重新安装最新版本。</p>" +
+        "</div></body></html>";
+      win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+    }
+  );
 
   // 快捷键统一由下方应用菜单的 accelerator 提供（仅在本应用内生效），
   // 不再使用 globalShortcut，避免拦截系统及其他应用的全局按键。
@@ -407,7 +482,7 @@ function openUpdateWindow() {
       preload: UPDATE_UI.PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: !SANDBOX_DISABLED, // 同上：与降级模式保持一致
       devTools: false,
     },
   });
