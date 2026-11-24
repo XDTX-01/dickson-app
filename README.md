@@ -15,34 +15,23 @@ npm install electron electron-builder --save-dev
 npm start
 ```
 
-## 三、打包生成安装包
+## 三、打包（只能走 CI，本地打的包不能给用户）
 
-> 若打包时报 `unable to verify the first certificate`（证书校验失败，通常是安全软件/代理拦截），先执行第一条设置环境变量。
+原生保护能力（`protect.node`）和混淆产物（`build-protect/`）都是 CI 里现做的：
 
-```
-$env:NODE_TLS_REJECT_UNAUTHORIZED=0
-npm run package
-```
+- 本机没装 VS 时 `npm run build:native` 直接失败；
+- 即使跳过原生模块，缺 `build-protect/manifest.json` 的包在用户机器上会弹"程序文件校验失败或已被修改"并退出。
 
-打包完成后，`dist` 文件夹会生成两个关键文件：
+所以本地 `npm run package` 的产物**只能用来检查资源是否齐全，不能发给用户**。真正出包靠 `.github/workflows/build-release.yml`。
 
-- `dickson-color-studio Setup <版本号>.exe`（安装包）
-- `latest.yml`（版本信息，程序检测更新用，**必须随包一起上传**）
+## 四、发布新版（唯一路径：GitHub Actions）
 
-## 四、发布新版到 GitHub（让"检查更新"生效）
+1. **正常流程**：A 仓库构建前端 → 推 B 仓库 `dist` → 触发 C 仓库的 `repository_dispatch`，workflow 自动完成 编译原生模块 → 混淆 → 校验清单 → 打包 → 发 Release。
+2. **应急手动**：仓库 Actions → 选 `LaLaLa` → Run workflow（`new_tag` 可填，留空则自动取最新 Release 补丁 +1）。
+3. 版本号由 workflow 强制写入 `package.json`，本地不用手动改。
+4. `latest.yml` 与 `.blockmap` 由 CI 自动上传，不需要手工拖文件。
 
-1. 修改 `package.json` 里的 `version`（如 `1.0.0` → `1.0.1`，**只能递增，不能减小**）
-2. 执行上面的打包命令，生成新的安装包和 `latest.yml`
-3. 打开仓库：https://github.com/XDTX-01/dickson-app
-4. 点 **Releases** → **Create a new release**
-   - **Tag version** 填：`v<版本号>`（如 `v1.0.1`）
-   - **Release title** 填：`<版本号>`（如 `1.0.1`）
-5. 把 `dist` 里的 **Setup.exe** 和 **latest.yml** **两个文件都**拖进 "Attach binaries"
-6. 点 **Publish release**
-
-> ⚠️ 关键：
-> - `latest.yml` 必须上传，否则客户端点"检查更新"检测不到新版。
-> - 每次发版用**新生成的** `latest.yml`，版本号只增不减。
+> ⚠️ 原来的 `release.js` / `token.txt` 本地一键发布流程已删除：它不跑 native 与 protect，产出的安装包缺校验清单，用户装上会出现"打不开"；而 `--publish always` 还会覆盖 `latest.yml`，把已装用户自动更新到坏包。
 
 ## 五、检查更新界面（update-ui）
 
@@ -93,9 +82,10 @@ $env:DICKSON_UPDATE_DEMO="1"; npm start
 
 ## 六、完整性校验与沙箱
 
-- `npm run protect` 除了混淆 `app.js`，还会生成 `build-protect/manifest.json`，把 `build-protect/app.js`、`src/index.html`、`src/preload.js`、`update-ui/index.html`、`update-ui/preload.js`、`package.json` 的 sha256 全部登记进去；启动时 `bootstrap.js` 逐文件比对，任何一个被改过就直接退出（以前只校验 `app.js`，改界面 HTML 完全发现不了）
+- `npm run protect` 除了混淆 `app.js`，还会生成 `build-protect/manifest.json`，把 `build-protect/app.js`、`src/index.html`、`src/preload.js`、`update-ui/index.html`、`update-ui/preload.js` 的 sha256 全部登记进去；启动时 `bootstrap.js` 逐文件比对，任何一个被改过就弹窗提示并退出（以前只校验 `app.js`，改界面 HTML 完全发现不了）。`package.json` 刻意不纳入：CI 会在打包前改写 version，纳进去会让所有人都对不上
 - 文件放在 asar 里，C++ 的 ifstream 读不到，所以改由 Node 读出内容交给原生模块 `verifyBuffer()` 算哈希
 - 渲染进程沙箱默认开启；只有确认被策略禁用的环境才用 `DICKSON_NO_SANDBOX=1` 关闭，不要无条件加 `--no-sandbox`
+- 硬件加速默认开启（滚动、材质缩略图、高分屏靠 GPU 合成）。GPU 进程崩溃按次数分级处理：第 1 次只记日志，第 2 次写入永久标记（下次启动软件渲染），第 3 次直接带 `--disable-gpu` 重启。要强制软件渲染用 `DICKSON_NO_GPU=1`；被标记降级后想恢复，设 `DICKSON_GPU=1` 或删掉 `%APPDATA%\dickson-color-studio\gpu-fallback.json`。崩溃记录见 `%APPDATA%\dickson-color-studio\logs\gpu.log`
 - 安装包目前**没有代码签名**。要过 SmartScreen 并真正挡住 asar 被整体替换，需要在 CI 里配置 `CSC_LINK`（证书 p12 的 base64 或路径）和 `CSC_KEY_PASSWORD` 环境变量，electron-builder 会自动签名；没有证书时这一步只能先空着
 
 
