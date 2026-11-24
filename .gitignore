@@ -1,0 +1,17 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build-protect/
+protect/build/
+protect/*.node
+
+# 本地发布脚本用到的 GitHub Token（绝不要提交）
+token.txt
+*.token
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
