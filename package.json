@@ -31,7 +31,6 @@
       "build-protect/**/*",
       "protect/**/*",
       "bootstrap.js",
-      "main.js",
       "src/**/*",
       "update-ui/**/*",
       "package.json",

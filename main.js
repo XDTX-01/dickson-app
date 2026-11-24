@@ -20,7 +20,8 @@ app.disableHardwareAcceleration(); // 部分机器 GPU 初始化导致渲染进�
 //   3) 快捷方式/命令行加 --no-sandbox
 const SANDBOX_DISABLED =
   process.env.DICKSON_NO_SANDBOX === "1" ||
-  process.argv.indexOf("--no-sandbox") !== -1;
+  process.argv.indexOf("--no-sandbox") !== -1 ||
+  app.commandLine.hasSwitch("no-sandbox"); // 兜底：Chromium 自己解析过的开关
 
 if (SANDBOX_DISABLED) {
   app.commandLine.appendSwitch("no-sandbox");

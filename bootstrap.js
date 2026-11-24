@@ -16,7 +16,7 @@ try {
 // 判断“是不是生产包”只看 app.isPackaged，不再看原生模块能不能 require。
 // 以前用 native 是否存在来判断：本地一旦编译过 protect.node，npm start 就会误入生产分支，
 // 找不到 build-protect/app.js 就 process.exit(1)，表现为“启动毫无反应”。
-if (!native || !app.isPackaged) {
+if (!app.isPackaged) {
     require('./main.js');
     return;
 }
@@ -54,7 +54,11 @@ function abort(reason) {
     process.exit(1);
 }
 
-// 老版本原生模块没有 verifyBuffer，能力不齐就没有校验意义
+// 老版本原生模块没有 verifyBuffer，能力不齐就没有校验意义；
+// 另外杀毒软件把 protect.node 清掉时也走这里：不能悄悄退出，否则用户双击没反应
+if (!native) {
+    abort('protect.node 缺失或无法加载');
+}
 if (typeof native.verifyBuffer !== 'function' || typeof native.verifyFile !== 'function') {
     abort('native 模块缺少 verifyBuffer / verifyFile');
 }
@@ -78,9 +82,9 @@ for (const rel of entries) {
     const expected = String(expectedFiles[rel] || '');
     if (!expected) abort('校验清单内容为空: ' + rel);
 
-    // build-protect 下的文件在 asarUnpack 的真实目录，其余文件按 asar 根目录解析
+    // build-protect 下的文件在 asarUnpack 的真实目录（保留相对子路径），其余文件按 asar 根目录解析
     const abs = rel.indexOf('build-protect/') === 0
-        ? path.join(unpackedDir, path.basename(rel))
+        ? path.join(unpackedDir, rel.slice('build-protect/'.length))
         : path.join(__dirname, rel);
 
     let content = null;

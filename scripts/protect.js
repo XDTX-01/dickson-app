@@ -36,15 +36,16 @@ const sum = crypto.createHash('sha256').update(obfuscated).digest('hex');
 fs.writeFileSync(path.join(outDir, 'checksum.txt'), sum + '\n');
 
 // L4（扩展）：只校验 app.js 时，改 src/index.html 或 update-ui/index.html 完全察觉不到。
-// 这里把界面、preload、package.json 一并纳入清单，bootstrap 启动时逐文件比对。
+// 这里把界面、preload 一并纳入清单，bootstrap 启动时逐文件比对。
 // 键是“相对应用根目录”的路径，asar 内的文件由 bootstrap 读出内容、哈希仍由原生模块计算。
+// 注意：不要放 package.json —— CI 会在打包前改写 version，且 electron-builder 可能重写该文件，
+// 一旦打包后字节变了对不上，等于把所有人都锁死在“校验失败”弹窗里。
 const CHECKED_FILES = [
     'build-protect/app.js',
     'src/index.html',
     'src/preload.js',
     'update-ui/index.html',
     'update-ui/preload.js',
-    'package.json',
 ];
 
 const files = {};
