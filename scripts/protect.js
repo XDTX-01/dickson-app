@@ -35,18 +35,32 @@ fs.writeFileSync(appPath, obfuscated);
 const sum = crypto.createHash('sha256').update(obfuscated).digest('hex');
 fs.writeFileSync(path.join(outDir, 'checksum.txt'), sum + '\n');
 
-// L4（扩展）：只校验 app.js 时，改 src/index.html 或 update-ui/index.html 完全察觉不到。
-// 这里把界面、preload 一并纳入清单，bootstrap 启动时逐文件比对。
-// 键是“相对应用根目录”的路径，asar 内的文件由 bootstrap 读出内容、哈希仍由原生模块计算。
-// 注意：不要放 package.json —— CI 会在打包前改写 version，且 electron-builder 可能重写该文件，
-// 一旦打包后字节变了对不上，等于把所有人都锁死在“校验失败”弹窗里。
-const CHECKED_FILES = [
-    'build-protect/app.js',
-    'src/index.html',
-    'src/preload.js',
-    'update-ui/index.html',
-    'update-ui/preload.js',
-];
+// L4（扩展）：只校验 app.js / index.html 时，改任意一个 js chunk 都能悄悄换掉界面逻辑。
+// 这里把 src 下的代码与样式产物、dialog-ui、update-ui 全部纳入清单（图片素材除外：
+// 40MB+ 的 jpg 每次启动都哈希会明显拖慢启动，而且改图最多换个纹理，改代码才是真风险）。
+const CHECKED_FILES = ['build-protect/app.js'];
+
+function walk(dir, base, list) {
+    const abs = path.join(root, dir);
+    if (!fs.existsSync(abs)) return;
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+        const rel = base + '/' + entry.name;
+        if (entry.isDirectory()) {
+            // 素材图不参与完整性校验
+            if (entry.name === 'img') continue;
+            walk(dir + '/' + entry.name, rel, list);
+        } else {
+            // 素材图、构建期 .gz 副本不参与完整性校验（图片 40MB+ 会拖慢启动，gz 只是发布用副本）
+            if (/\.(map|gz|jpg|jpeg|png|gif|webp)$/i.test(entry.name)) continue;
+            list.push(rel);
+        }
+    }
+}
+
+walk('src', 'src', CHECKED_FILES);
+walk('dialog-ui', 'dialog-ui', CHECKED_FILES);
+walk('update-ui', 'update-ui', CHECKED_FILES);
+CHECKED_FILES.sort();
 
 const files = {};
 const missing = [];
