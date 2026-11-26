@@ -1,4 +1,11 @@
 // 预加载脚本（preload）
-// 当前应用为纯静态页面，无需向渲染进程暴露 Node 能力。
-// 保持安全默认：contextIsolation = true、nodeIntegration = false、sandbox = true。
-// 未来如需安全 IPC 桥接，可在此通过 contextBridge.exposeInMainWorld 暴露受控接口。
+// 只向渲染进程暴露「保存文件 / 在文件夹中显示」两个接口，其余 Node 能力一律不暴露。
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("dicksonSave", (payload) =>
+  ipcRenderer.invoke("app:save-file", payload)
+);
+
+contextBridge.exposeInMainWorld("dicksonReveal", (filePath) =>
+  ipcRenderer.invoke("app:reveal-file", filePath)
+);
