@@ -33,6 +33,13 @@
     flex: 1 1 auto; min-height: 0; display: flex; gap: 14px;
     padding: 22px 24px 6px; overflow-y: auto; -webkit-app-region: no-drag;
   }
+  /* 图标与正文横排：不给 gap 的话 badge 右边缘会和文字左边缘贴死 */
+  .single {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    width: 100%;
+  }
   .badge {
     flex: 0 0 38px; width: 38px; height: 38px; border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
@@ -234,6 +241,17 @@
     }
 
     renderButtons(state.buttons);
+
+    // 首帧渲染完按真实内容高度撑开窗口：清单条数 / 文案换行都不再由固定高度决定
+    requestAnimationFrame(function () {
+      if (!bridge || typeof bridge.resize !== "function") return;
+      var titlebar = document.querySelector(".titlebar");
+      var body = document.querySelector(".body");
+      var footer = document.querySelector(".footer");
+      if (!titlebar || !body || !footer) return;
+      var need = titlebar.offsetHeight + body.scrollHeight + footer.offsetHeight;
+      bridge.resize(need);
+    });
   }
 
   if (bridge && typeof bridge.onReady === "function") {

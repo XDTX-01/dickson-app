@@ -14,4 +14,9 @@ contextBridge.exposeInMainWorld("dialogUI", {
     const n = Number(index);
     ipcRenderer.send("dialog:action", Number.isFinite(n) ? n : -1);
   },
+  // 内容渲染完后按真实高度请求主进程撑开窗口，避免清单被固定高度挤成一条
+  resize(height) {
+    const n = Math.round(Number(height));
+    if (Number.isFinite(n) && n > 0) ipcRenderer.send("dialog:resize", n);
+  },
 });
