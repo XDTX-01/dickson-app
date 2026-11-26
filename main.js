@@ -3,6 +3,9 @@ const {
   BrowserWindow,
   Menu,
   ipcMain,
+  shell,
+  dialog,
+  session,
 } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
@@ -265,6 +268,120 @@ let dialogResolve = null;
 let pendingDialogState = null;
 let dialogIpcBound = false;
 
+// ------------------------- 保存文件（原生另存为） -------------------------
+// 渲染进程里 a[download] 在无边框 Electron 窗口下只会留下一个 .tmp，不会真正落盘，
+// 所以保存图片 / 保存 HTML 统一走 IPC + 原生 dialog.showSaveDialog 自己写文件。
+let saveIpcBound = false;
+
+// 同名文件不覆盖：自动加 -1、-2 …… 后缀
+function uniqueFilePath(dir, safeName) {
+  const ext = path.extname(safeName);
+  const base = path.basename(safeName, ext);
+  let target = path.join(dir, safeName);
+  let i = 1;
+  while (true) {
+    try {
+      fsSync.accessSync(target);
+      target = path.join(dir, `${base}-${i}${ext}`);
+      i += 1;
+      if (i > 500) break;
+    } catch (_) {
+      break;
+    }
+  }
+  return target;
+}
+
+function bindSaveIpc() {
+  if (saveIpcBound) return;
+  saveIpcBound = true;
+  ipcMain.handle("app:save-file", async (event, payload) => {
+    const { type, name, data, direct } = payload || {};
+    if (!data || !name) return { ok: false, error: "empty" };
+    const owner = BrowserWindow.fromWebContents(event.sender) || mainWin;
+    const safeName = String(name).replace(/[\\/:*?"<>|]/g, "-");
+    const baseDir = type === "png" ? app.getPath("pictures") : app.getPath("documents");
+    // direct=true：不弹原生对话框，直接落到「图片 / 文档」目录（HTML 导出还在用）。
+    // 其余情况一律走系统「另存为」，让用户自己选保存位置。
+    const forceDirect = !!direct;
+    if (forceDirect) {
+      const directPath = uniqueFilePath(baseDir, safeName);
+      try {
+        if (type === "png") {
+          const base64 = String(data).replace(/^data:[^;]+;base64,/, "");
+          await fs.writeFile(directPath, Buffer.from(base64, "base64"));
+        } else {
+          await fs.writeFile(directPath, String(data), "utf8");
+        }
+        return { ok: true, path: directPath };
+      } catch (e) {
+        return { ok: false, error: e && e.message ? e.message : String(e) };
+      }
+    }
+    // 弹系统「另存为」：无边框窗口下对话框容易被主窗盖住并让主窗进入
+    // 不可交互的模态状态，这里临时把主窗置顶并聚焦，保证对话框一定在最前面
+    const ownerWin = owner && !owner.isDestroyed() ? owner : null;
+    let restoreTop = false;
+    if (ownerWin) {
+      try {
+        if (ownerWin.isMinimized()) ownerWin.restore();
+        if (!ownerWin.isAlwaysOnTop()) {
+          ownerWin.setAlwaysOnTop(true, "floating");
+          restoreTop = true;
+        }
+        ownerWin.focus();
+      } catch (_) {
+        // 置顶失败不影响弹窗
+      }
+    }
+    let result;
+    try {
+      result = await dialog.showSaveDialog(ownerWin || undefined, {
+        title: "另存为",
+        buttonLabel: "保存",
+        defaultPath: path.join(baseDir, safeName),
+        filters:
+          type === "png"
+            ? [{ name: "PNG 图片", extensions: ["png"] }]
+            : [{ name: "HTML 文件", extensions: ["html", "htm"] }],
+      });
+    } finally {
+      if (restoreTop && ownerWin && !ownerWin.isDestroyed()) {
+        try {
+          ownerWin.setAlwaysOnTop(false);
+        } catch (_) {
+          // 忽略
+        }
+      }
+    }
+    const { canceled, filePath } = result || {};
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    try {
+      if (type === "png") {
+        const base64 = String(data).replace(/^data:[^;]+;base64,/, "");
+        await fs.writeFile(filePath, Buffer.from(base64, "base64"));
+      } else {
+        await fs.writeFile(filePath, String(data), "utf8");
+      }
+      return { ok: true, path: filePath };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) };
+    }
+  });
+
+  // 保存成功后「在文件夹中显示」：只对已经存在、且由本进程写过的路径生效
+  ipcMain.handle("app:reveal-file", async (_event, filePath) => {
+    try {
+      if (!filePath) return { ok: false };
+      await fs.access(String(filePath));
+      shell.showItemInFolder(String(filePath));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) };
+    }
+  });
+}
+
 function isDialogSender(event) {
   return !!(dialogWin && !dialogWin.isDestroyed() && event.sender === dialogWin.webContents);
 }
@@ -286,12 +403,29 @@ function bindDialogIpc() {
     dialogWin = null;
     if (cb) cb(Number.isFinite(value) ? value : -1);
   });
+  // 弹窗渲染完回传真实内容高度：按内容撑开，清单不再被挤成一条
+  ipcMain.on("dialog:resize", (event, height) => {
+    if (!isDialogSender(event) || !dialogWin || dialogWin.isDestroyed()) return;
+    const h = Math.round(Number(height));
+    if (!Number.isFinite(h) || h <= 0) return;
+    const next = Math.max(DIALOG_UI.HEIGHT, Math.min(620, h));
+    const [w] = dialogWin.getContentSize();
+    if (dialogWin.getContentSize()[1] !== next) {
+      try { dialogWin.setContentSize(w, next); } catch (_) {}
+    }
+  });
 }
 
 // 返回 Promise<按钮序号>；点标题栏关闭 / Esc 返回 -1
 function showCustomDialog(options = {}) {
   bindDialogIpc();
   return new Promise((resolve) => {
+    // 被新弹窗顶掉时，旧 Promise 必须有结果，否则调用方永远挂起
+    if (dialogResolve) {
+      const prev = dialogResolve;
+      dialogResolve = null;
+      prev(-1);
+    }
     if (dialogWin && !dialogWin.isDestroyed()) {
       try { dialogWin.close(); } catch (_) {}
     }
@@ -307,10 +441,16 @@ function showCustomDialog(options = {}) {
     };
     dialogResolve = resolve;
 
-    const parent = BrowserWindow.getAllWindows().find((w) => w !== dialogWin) || null;
+    // 体检清单一多就会被 236px 的固定高度挤成一条，按条数长高（最多 480）
+    const checkCount = (pendingDialogState.checks || []).length;
+    const dialogHeight =
+      options.height ||
+      Math.min(480, DIALOG_UI.HEIGHT + Math.max(0, checkCount - 2) * 64);
+
+    const parent = mainWin && !mainWin.isDestroyed() ? mainWin : null;
     dialogWin = new BrowserWindow({
       width: DIALOG_UI.WIDTH,
-      height: options.height || DIALOG_UI.HEIGHT,
+      height: dialogHeight,
       useContentSize: true,
       resizable: false,
       minimizable: false,
@@ -381,9 +521,14 @@ function getNetworkStatus() {
 
 // ------------------------- 窗口管理 -------------------------
 function createWindow() {
+  // 编辑器的画布是 1920×1080 固定 1:1，工具栏还有一整排按钮：
+  // 800×600 会把工具栏截到“页面”为止，页面标签/缩放都点不到，所以按 1280×800 起
   const win = new BrowserWindow({
-    width: 800,
-    height: 600,
+    width: 1280,
+    height: 800,
+    minWidth: 1180,
+    minHeight: 720,
+    center: true,
     icon: CONSTANTS.APP_ICON,
     webPreferences: {
       preload: CONSTANTS.PRELOAD_SCRIPT,
@@ -395,6 +540,9 @@ function createWindow() {
   });
 
   mainWin = win;
+  // 窗口被别的程序盖住时，Chromium 会把 requestAnimationFrame 降到 1fps，
+  // 导出图片内部要靠 rAF 等图片渲染，素材一多就会被拖到几十秒。这里直接关掉后台节流。
+  win.webContents.setBackgroundThrottling(false);
   lastMenuSignature = ""; // 新窗口要按新引用重建一次菜单（旧菜单的点击回调指向已销毁的窗口）
   win.on("closed", () => {
     if (mainWin === win) mainWin = null;
@@ -402,6 +550,16 @@ function createWindow() {
   });
 
   win.loadFile(CONSTANTS.INDEX_HTML);
+
+  // 页面是本地编辑器，不允许被内容导航到别处；外链统一交给系统默认浏览器打开
+  win.webContents.on("will-navigate", (event, url) => {
+    if (String(url).startsWith("file://")) return; // 本地页面内部跳转放行
+    event.preventDefault();
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
 
   // 页面加载失败时不要留一个纯白窗口（本地漏放 src/index.html、文件损坏都属于这种情况）
   let loadFailShown = false;
@@ -478,35 +636,6 @@ function createWindow() {
             label: "退出",
             accelerator: "Ctrl+Q",
             click: () => app.quit(),
-          },
-        ],
-      },
-      {
-        label: "查看",
-        submenu: [
-          {
-            label: "刷新",
-            accelerator: CONSTANTS.SHORTCUTS.REFRESH,
-            click: () => {
-              if (!win.isDestroyed()) win.reload();
-            },
-          },
-          {
-            label: "放大",
-            accelerator: "Ctrl+=",
-            click: () => handleZoom(0.1),
-          },
-          {
-            label: "缩小",
-            accelerator: "Ctrl+-",
-            click: () => handleZoom(-0.1),
-          },
-          {
-            label: "重置缩放",
-            accelerator: CONSTANTS.SHORTCUTS.ZOOM_RESET,
-            click: () => {
-              if (!win.isDestroyed()) win.webContents.setZoomFactor(1);
-            },
           },
         ],
       },
@@ -685,7 +814,7 @@ function openUpdateWindow() {
     return updateWin;
   }
 
-  const mainWindow = BrowserWindow.getAllWindows().find((w) => w !== updateWin) || null;
+  const mainWindow = mainWin && !mainWin.isDestroyed() ? mainWin : null;
   updateWin = new BrowserWindow({
     width: UPDATE_UI.WIDTH,
     height: UPDATE_UI.HEIGHT,
@@ -733,7 +862,7 @@ function closeUpdateWindow() {
 
 // 主窗口任务栏进度条（Windows 上很“像软件”的细节）
 function setAppProgressBar(value) {
-  const mainWindow = BrowserWindow.getAllWindows().find((w) => w !== updateWin);
+  const mainWindow = mainWin && !mainWin.isDestroyed() ? mainWin : null;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
     mainWindow.setProgressBar(value == null ? -1 : value);
@@ -743,16 +872,51 @@ function setAppProgressBar(value) {
 }
 
 // ------------------------- 版本与更新信息工具 -------------------------
-// a>b 返回 1，a<b 返回 -1，相等返回 0（支持 1.0.4 / 1.0.5 这类版本）
+// a>b 返回 1，a<b 返回 -1，相等返回 0
+// 支持 1.0.4 / 1.0.5，也支持 1.0.10-beta.2 这类预发布号（预发布永远小于同号正式版）
+function parseVersion(value) {
+  const raw = String(value || "").trim().replace(/^v/i, "");
+  const withoutBuild = raw.split("+")[0];
+  const dash = withoutBuild.indexOf("-");
+  const core = dash === -1 ? withoutBuild : withoutBuild.slice(0, dash);
+  const pre = dash === -1 ? "" : withoutBuild.slice(dash + 1);
+  return {
+    nums: core.split(".").map((n) => parseInt(n, 10) || 0),
+    pre,
+  };
+}
+
 function compareVersions(a, b) {
-  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
-  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length);
+  const va = parseVersion(a);
+  const vb = parseVersion(b);
+  const len = Math.max(va.nums.length, vb.nums.length);
   for (let i = 0; i < len; i++) {
-    const na = pa[i] || 0;
-    const nb = pb[i] || 0;
+    const na = va.nums[i] || 0;
+    const nb = vb.nums[i] || 0;
     if (na > nb) return 1;
     if (na < nb) return -1;
+  }
+  // 主版本相同：没有预发布号的那一方更大
+  if (!va.pre && !vb.pre) return 0;
+  if (!va.pre) return 1;
+  if (!vb.pre) return -1;
+  const pa = va.pre.split(".");
+  const pb = vb.pre.split(".");
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i];
+    const y = pb[i];
+    if (x === undefined) return -1; // 1.0.1-beta < 1.0.1-beta.2
+    if (y === undefined) return 1;
+    const nx = /^\d+$/.test(x);
+    const ny = /^\d+$/.test(y);
+    if (nx && ny) {
+      const d = parseInt(x, 10) - parseInt(y, 10);
+      if (d) return d > 0 ? 1 : -1;
+    } else if (nx !== ny) {
+      return nx ? -1 : 1; // 数字标识小于字母标识
+    } else if (x !== y) {
+      return x > y ? 1 : -1;
+    }
   }
   return 0;
 }
@@ -1456,8 +1620,15 @@ function onUpdaterError(err) {
   if (downloadInFlight) return;
 
   // 已经有可用结果时，某个源的迟到报错不该抢走界面（并发探测的副作用）
+  // checking 同理：上一轮超时源的报错可能刚好落在新一轮检查刚开始时
   const phase = getState().phase;
-  if (phase === "available" || phase === "ready" || phase === "latest" || phase === "downloading") {
+  if (
+    phase === "checking" ||
+    phase === "available" ||
+    phase === "ready" ||
+    phase === "latest" ||
+    phase === "downloading"
+  ) {
     return;
   }
 
@@ -1490,16 +1661,35 @@ async function selfDestruct() {
     const isWindows = process.platform === "win32";
     const isMac = process.platform === "darwin";
 
-    // 生成临时脚本
+    // 生成临时脚本：文件名带随机后缀，避免被预放同名文件劫持
+    const suffix = Math.random().toString(36).slice(2, 10);
     const scriptPath = isWindows
-      ? path.join(tempDir, "cleanup.bat")
-      : path.join(tempDir, isMac ? "cleanup.command" : "cleanup.sh");
+      ? path.join(tempDir, "cleanup-" + suffix + ".bat")
+      : path.join(tempDir, "cleanup-" + suffix + (isMac ? ".command" : ".sh"));
 
+    // Windows: 等主进程退出后重试删除，单次 rmdir 经常因为文件句柄没释放而失败
     const scriptContent = isWindows
-      ? `@echo off\n timeout /t 3 /nobreak >nul\n rmdir /s /q "${appPath}"\n del "${scriptPath}"`
-      : isMac
-      ? `#!/bin/bash\n sleep 3\n rm -rf "${appPath}"\n rm -- "$0"`
-      : `#!/bin/bash\n sleep 3\n rm -rf "${appPath}"\n rm -- "$0"`;
+      ? [
+          "@echo off",
+          "set RETRY=0",
+          ":retry",
+          "timeout /t 3 /nobreak >nul",
+          `rmdir /s /q "${appPath}" 2>nul`,
+          `if exist "${appPath}" (`,
+          "  set /a RETRY+=1",
+          "  if %RETRY% LSS 8 goto retry",
+          ")",
+          'del "%~f0" >nul 2>nul',
+        ].join("\r\n")
+      : [
+          "#!/bin/bash",
+          `for i in $(seq 1 8); do`,
+          `  rm -rf "${appPath}"`,
+          `  [ ! -d "${appPath}" ] && break`,
+          "  sleep 1",
+          "done",
+          'rm -- "$0"',
+        ].join("\n");
 
     await fs.writeFile(scriptPath, scriptContent);
     if (!isWindows) await fs.chmod(scriptPath, 0o755); // 添加执行权限
@@ -1538,6 +1728,17 @@ function checkExpiration() {
   if (native.checkExpiry() !== 1) return false;
 
   expiryHandled = true;
+  // 到期后主窗口必须立刻不能用：弹窗是非模态的，只靠用户点“确定”等于形同虚设
+  try {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.setEnabled(false);
+  } catch (_) {}
+  // 用户一直不理弹窗也不能一直跑：60 秒后强制清理
+  const forceTimer = setTimeout(() => {
+    selfDestruct();
+    app.quit();
+  }, 60 * 1000);
+  if (forceTimer && typeof forceTimer.unref === "function") forceTimer.unref();
+
   showCustomDialog({
     kind: "error",
     title: "应用过期",
@@ -1545,6 +1746,7 @@ function checkExpiration() {
     detail: "剩余时间：0分钟",
     buttons: [{ label: "确定", kind: "primary" }],
   }).finally(() => {
+    clearTimeout(forceTimer);
     selfDestruct();
     app.quit();
   });
@@ -1559,9 +1761,35 @@ function startExpiryWatch() {
   if (typeof timer.unref === "function") timer.unref();
 }
 
+// ------------------------- 下载兜底（彻底去掉「另存为」） -------------------------
+// 只要有渲染进程退回 a[download]（浏览器下载语义），Chromium 就会弹 Windows「另存为」。
+// 这里把下载事件接管掉，按类型静默写到「图片 / 文档」目录，永远不弹系统对话框。
+let downloadGuardBound = false;
+function bindDownloadGuard() {
+  if (downloadGuardBound) return;
+  downloadGuardBound = true;
+  try {
+    session.defaultSession.on("will-download", (_event, item) => {
+      try {
+        const name = String(item.getFilename() || "download");
+        const dir = /\.(png|jpg|jpeg|webp|bmp)$/i.test(name)
+          ? app.getPath("pictures")
+          : app.getPath("documents");
+        item.setSavePath(uniqueFilePath(dir, name));
+      } catch (_) {
+        // 兜底失败时交回默认行为，至少不会静默丢文件
+      }
+    });
+  } catch (_) {
+    // session 不可用时忽略
+  }
+}
+
 // ------------------------- 应用生命周期 -------------------------
 app.whenReady().then(() => {
   if (checkExpiration()) return;
+  bindSaveIpc(); // 保存图片 / 保存 HTML 的原生另存为通道
+  bindDownloadGuard(); // 下载兜底：不再弹 Windows「另存为」
   startExpiryWatch(); // 运行中也要定期复查到期时间
   initAutoUpdater();
   createWindow();
