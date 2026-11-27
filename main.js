@@ -295,6 +295,26 @@ function uniqueFilePath(dir, safeName) {
 function bindSaveIpc() {
   if (saveIpcBound) return;
   saveIpcBound = true;
+  // 渲染进程点「保存」前先问主窗口状态：窗口被最小化 / 不可见时 Chromium 会节流渲染，
+  // html-to-image 迟迟不返回，只会白等一次超时，所以要把状态告诉前端，让它先提示。
+  // 点「保存」时把窗口还原到前台：窗口最小化时 Chromium 会节流渲染，导出会一直停在「生成中」
+  ipcMain.handle("app:ensure-visible", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWin;
+    if (!win || win.isDestroyed()) return { ok: false };
+    try {
+      if (win.isMinimized()) win.restore();
+      if (!win.isVisible()) win.show();
+      win.focus();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) };
+    }
+  });
+  ipcMain.handle("app:window-state", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWin;
+    if (!win || win.isDestroyed()) return { minimized: false, visible: true };
+    return { minimized: win.isMinimized(), visible: win.isVisible() };
+  });
   ipcMain.handle("app:save-file", async (event, payload) => {
     const { type, name, data, direct } = payload || {};
     if (!data || !name) return { ok: false, error: "empty" };
