@@ -997,10 +997,10 @@ function createWindow() {
     ];
 
     // 授权剩余分钟数：开发模式没有到期时间，就不放这一项
-    if (minutesLeft != null) template.push({ label: `剩余 ${minutesLeft} 分钟`, enabled: false });
+    if (minutesLeft != null) template.push({ label: ` ${minutesLeft} `, enabled: false });
 
     // 渲染模式：放在“检查更新”前面，只显示 GPU / CPU，方便随时确认当前模式
-    template.push({ label: `渲染: ${renderMode.label}`, enabled: false });
+    template.push({ label: `${renderMode.label}`, enabled: false });
 
     template.push({
       label: "检查更新",
