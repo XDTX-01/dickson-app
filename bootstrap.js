@@ -3,6 +3,7 @@
 // 开发：未打包（app.isPackaged === false）直接跑源码 main.js，npm start 可直接测试
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const Module = require('module');
 const { app, dialog } = require('electron');
 
@@ -22,11 +23,11 @@ if (!app.isPackaged) {
 }
 
 // ------------------------- 生产模式 -------------------------
-// 关键文件都在 asar 里，C++ 的 ifstream 读不到虚拟文件系统：
-// 由 Node 侧读出内容（异步透明支持 asar），哈希计算仍在原生模块里做
-const unpackedDir = path.join(__dirname, '..', 'app.asar.unpacked', 'build-protect');
-const manifestPath = path.join(unpackedDir, 'manifest.json');
-const appPath = path.join(unpackedDir, 'app.js');
+// 全部关键文件（含混淆产物 app.js）都留在 asar 里，只有 .node 被 electron-builder 解包：
+// C++ 的 ifstream 读不到虚拟文件系统，所以由 Node 侧读出内容（异步透明支持 asar），
+// 哈希计算仍在原生模块里做。security 上也不再需要把 build-protect 解包到磁盘。
+const manifestPath = path.join(__dirname, 'build-protect', 'manifest.json');
+const appPath = path.join(__dirname, 'build-protect', 'app.js');
 
 // 校验失败：对篡改者只说“校验失败”，明细只写本地日志；
 // 但不再静默退出——双击了没反应比弹出提示更让人抓狂
@@ -54,7 +55,7 @@ function abort(reason) {
     process.exit(1);
 }
 
-// 老版本原生模块没有 verifyBuffer，能力不齐就没有校验意义；
+// 老版本原生模块没有 verifyBuffer / verifyFile，能力不齐就没有校验意义；
 // 另外杀毒软件把 protect.node 清掉时也走这里：不能悄悄退出，否则用户双击没反应
 if (!native) {
     abort('protect.node 缺失或无法加载');
@@ -82,28 +83,64 @@ if (!expectedFiles || typeof expectedFiles !== 'object' || Array.isArray(expecte
 const entries = Object.keys(expectedFiles);
 if (entries.length === 0) abort('manifest.json 未登记任何文件');
 
-for (const rel of entries) {
-    // 相对路径校验：清单里不允许绝对路径 / ../，否则可以把校验目标指到应用目录之外
+// 清单里的相对路径统一做一次合法性校验：不允许绝对路径 / ../，也不允许空字节，
+// 否则可以把校验目标指到应用目录之外
+function resolveEntry(rel) {
     if (typeof rel !== 'string' || rel.indexOf('\0') !== -1) abort('非法文件名: ' + rel);
     if (path.isAbsolute(rel) || rel.split(/[\\/]/).indexOf('..') !== -1) {
         abort('清单包含越界路径: ' + rel);
     }
+    return path.join(__dirname, rel);
+}
+
+// 第一步：先校验原生模块自己。它是下面所有校验的执行者，被换成“永远返回 true”的桩，
+// 整条完整性链条就等于没有。所以这一条必须用 Node 的 crypto 算，不能用它自己验自己。
+const NATIVE_REL = 'protect/protect.node';
+if (entries.indexOf(NATIVE_REL) === -1) abort('校验清单未登记原生模块: ' + NATIVE_REL);
+{
+    const expected = String(expectedFiles[NATIVE_REL] || '').toLowerCase();
+    if (!expected) abort('校验清单内容为空: ' + NATIVE_REL);
+    let actual = '';
+    try {
+        actual = crypto
+            .createHash('sha256')
+            .update(fs.readFileSync(resolveEntry(NATIVE_REL)))
+            .digest('hex');
+    } catch (_) {
+        abort('原生模块读取失败: ' + NATIVE_REL);
+    }
+    if (actual !== expected) abort('原生模块校验不一致: ' + NATIVE_REL);
+}
+
+// 第二步：其余文件交给原生模块逐字节校验
+for (const rel of entries) {
+    if (rel === NATIVE_REL) continue; // 上面已经用 crypto 验过
 
     const expected = String(expectedFiles[rel] || '');
     if (!expected) abort('校验清单内容为空: ' + rel);
 
-    // build-protect 下的文件在 asarUnpack 的真实目录（保留相对子路径），其余文件按 asar 根目录解析
-    const abs = rel.indexOf('build-protect/') === 0
-        ? path.join(unpackedDir, rel.slice('build-protect/'.length))
-        : path.join(__dirname, rel);
-
     let content = null;
     try {
-        content = fs.readFileSync(abs);
+        content = fs.readFileSync(resolveEntry(rel));
     } catch (_) {
         abort('读取失败: ' + rel);
     }
     if (!native.verifyBuffer(content, expected)) abort('校验不一致: ' + rel);
+}
+
+// 第三步：素材图只比对字节数（protect 阶段登记，启动时只 stat 不读内容，几乎不占时间）
+const expectedAssets = manifest.assets;
+if (expectedAssets && typeof expectedAssets === 'object' && !Array.isArray(expectedAssets)) {
+    for (const rel of Object.keys(expectedAssets)) {
+        const expected = Number(expectedAssets[rel]);
+        let stat = null;
+        try {
+            stat = fs.statSync(resolveEntry(rel));
+        } catch (_) {
+            abort('素材缺失: ' + rel);
+        }
+        if (!stat.isFile() || stat.size !== expected) abort('素材大小不一致: ' + rel);
+    }
 }
 
 // 以 asar 根目录作为模块 __dirname 编译执行，保证 main.js 内的相对路径（src/、package.json）正确
