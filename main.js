@@ -54,10 +54,36 @@ const CONSTANTS = {
   ZOOM_LIMITS: { MIN: 0.5, MAX: 2.0 }, // 缩放限制
 };
 
+// 运行参数集中定义：原来 500/620/236/64、80ms、82MB 这类数字散落在各个函数里，
+// 改一处要翻全文，也容易和界面上的提示文案对不上
+const TIMING = {
+  MENU_REFRESH_MS: 30 * 1000, // 菜单内容没变就不重建
+  EXPIRY_CHECK_MS: 60 * 1000, // 运行期间复查到期时间
+  SANDBOX_FALLBACK_COOLDOWN_MS: 10 * 60 * 1000, // 同机 10 分钟内只降级一次
+  STARTUP_CHECK_DELAY_MS: 20 * 1000, // 启动后静默检查更新
+  PROBE_TIMEOUT_MS: 15 * 1000, // 单源探测超时
+  PROGRESS_THROTTLE_MS: 80, // 下载进度推送节流
+  DEMO_TICK_MS: 500, // 演示模式进度刷新
+  DIALOG_FORCE_EXIT_MS: 60 * 1000, // 过期弹窗无人响应后强制清理
+  RELAUNCH_DELAY_MS: 60, // 退出安装前等界面关闭
+};
+
+const LIMITS = {
+  SAVE_TEXT_MAX_BYTES: 32 * 1024 * 1024,
+  SAVE_IMAGE_MAX_BYTES: 256 * 1024 * 1024,
+  FILE_NAME_MAX_LEN: 120,
+  UNIQUE_NAME_MAX_TRIES: 500,
+  DIALOG_BASE_HEIGHT: 236,
+  DIALOG_MAX_HEIGHT: 620,
+  DIALOG_HEIGHT_PER_CHECK: 64,
+  DEMO_TOTAL_BYTES: 82 * 1048576,
+  DEMO_SPEED_BYTES: 2.6 * 1048576,
+};
+
 // 菜单刷新间隔：内容（IP / 到期分钟数 / 版本）没变就不会真的重建菜单
-const MENU_REFRESH_MS = 30 * 1000;
+const MENU_REFRESH_MS = TIMING.MENU_REFRESH_MS;
 // 运行期间复查到期时间的间隔：只在启动时判一次的话，挂机跨过到期点不会触发
-const EXPIRY_CHECK_INTERVAL = 60 * 1000;
+const EXPIRY_CHECK_INTERVAL = TIMING.EXPIRY_CHECK_MS;
 
 let mainWin = null; // 主窗口引用（second-instance 用，避免误取更新窗口）
 let menuTimer = null;
@@ -87,9 +113,12 @@ function sandboxFallbackFile() {
 
 function canFallbackToNoSandbox() {
   try {
-    const state = JSON.parse(fsSync.readFileSync(sandboxFallbackFile(), "utf8"));
-    return Date.now() - (Number(state.lastAt) || 0) > 10 * 60 * 1000;
+    const raw = fsSync.readFileSync(sandboxFallbackFile(), "utf8");
+    const state = JSON.parse(raw);
+    const lastAt = Number(state && state.lastAt) || 0;
+    return Date.now() - lastAt > TIMING.SANDBOX_FALLBACK_COOLDOWN_MS;
   } catch (_) {
+    // 文件不存在 / 内容损坏都按“可以降级”处理
     return true;
   }
 }
@@ -128,7 +157,8 @@ app.on("render-process-gone", (_event, _webContents, details) => {
 //   第 2 次                → 写永久标记，下次启动直接软件渲染
 //   第 3 次                → 立刻带 --disable-gpu 重启，不再让用户对着花屏等
 // 想强制恢复硬件加速：设环境变量 DICKSON_GPU=1，或删掉 userData/gpu-fallback.json
-const gpuFs = require("fs"); // 本段自包含：只用同步 fs，不依赖文件其它位置的定义
+// 本段只用同步 fs；与上方沙箱降级共用同一个 fsSync，避免同一文件 require 两次
+const gpuFs = fsSync;
 
 function gpuFallbackFile() {
   return path.join(app.getPath("userData"), "gpu-fallback.json");
@@ -248,7 +278,14 @@ function renderModeInfo() {
 // 到期时间的唯一来源是原生模块 expireAt()，JS 里不再保留第二份常量，
 // 避免“菜单显示还剩 N 分钟”和“真正自毁的时刻”对不上
 function licenseMinutesLeft() {
-  const expireAt = typeof native.expireAt === "function" ? native.expireAt() : 0;
+  let expireAt = 0;
+  try {
+    expireAt = typeof native.expireAt === "function" ? Number(native.expireAt()) || 0 : 0;
+  } catch (err) {
+    // 原生模块抛错时退化为“不显示倒计时”，不能因为菜单刷新失败拖垮主进程
+    console.warn("[license] expireAt 读取失败:", err && err.message);
+    return null;
+  }
   if (!expireAt) return null; // 开发模式（无原生模块）：不显示倒计时
   const left = expireAt - Date.now();
   return left <= 0 ? 0 : Math.ceil(left / 60000);
@@ -273,23 +310,60 @@ let dialogIpcBound = false;
 // 所以保存图片 / 保存 HTML 统一走 IPC + 原生 dialog.showSaveDialog 自己写文件。
 let saveIpcBound = false;
 
-// 同名文件不覆盖：自动加 -1、-2 …… 后缀
+// 文件名净化：只保留一个安全、长度可控的文件名，调用方再和目录拼路径
+// 以前只替换 \/:*?"<>|，剩下的控制字符、结尾的点/空格、“.”“..”都没处理
+function sanitizeFileName(name, fallback = "未命名") {
+  const raw = String(name == null ? "" : name).replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "-");
+  // Windows 不允许文件名以点或空格结尾，也不接受纯 "." / ".."
+  const cleaned = raw.replace(/[. ]+$/g, "").trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
+
+  const ext = path.extname(cleaned);
+  const base = path.basename(cleaned, ext) || fallback;
+  const maxBase = Math.max(1, LIMITS.FILE_NAME_MAX_LEN - ext.length);
+  return base.slice(0, maxBase) + ext.slice(0, LIMITS.FILE_NAME_MAX_LEN);
+}
+
+// 同名文件不覆盖：自动加 -1、-2 …… 后缀。
+// 这里只生成“当前没被占用”的候选名，真正落盘用 writeFileExclusive 的 wx 独占写入，
+// 避免“检查—写入”之间被别人抢先创建导致覆盖
 function uniqueFilePath(dir, safeName) {
   const ext = path.extname(safeName);
-  const base = path.basename(safeName, ext);
+  const base = path.basename(safeName, ext) || "未命名";
   let target = path.join(dir, safeName);
   let i = 1;
-  while (true) {
+  while (i <= LIMITS.UNIQUE_NAME_MAX_TRIES) {
     try {
       fsSync.accessSync(target);
-      target = path.join(dir, `${base}-${i}${ext}`);
-      i += 1;
-      if (i > 500) break;
     } catch (_) {
-      break;
+      return target; // 不存在，可以用
+    }
+    target = path.join(dir, `${base}-${i}${ext}`);
+    i += 1;
+  }
+  // 极端情况（同名文件超过 500 个）：带时间戳兜底，绝不返回已存在的路径覆盖用户文件
+  return path.join(dir, `${base}-${Date.now()}${ext}`);
+}
+
+// 独占写入（wx）：目标已存在时自动换名，最多重试 UNIQUE_NAME_MAX_TRIES 次
+async function writeFileExclusive(dir, safeName, payload) {
+  const ext = path.extname(safeName);
+  const base = path.basename(safeName, ext) || "未命名";
+  for (let i = 0; i <= LIMITS.UNIQUE_NAME_MAX_TRIES; i += 1) {
+    const target = i === 0
+      ? path.join(dir, `${base}${ext}`)
+      : path.join(dir, `${base}-${i}${ext}`);
+    try {
+      await fs.writeFile(target, payload, { flag: "wx" });
+      return target;
+    } catch (err) {
+      if (err && err.code === "EEXIST") continue;
+      throw err;
     }
   }
-  return target;
+  const fallback = path.join(dir, `${base}-${Date.now()}${ext}`);
+  await fs.writeFile(fallback, payload, { flag: "wx" });
+  return fallback;
 }
 
 function bindSaveIpc() {
@@ -315,29 +389,77 @@ function bindSaveIpc() {
     if (!win || win.isDestroyed()) return { minimized: false, visible: true };
     return { minimized: win.isMinimized(), visible: win.isVisible() };
   });
+  // 本进程真正写过盘的路径：reveal-file 只认这些，避免渲染进程被注入后
+  // 凭 invoke("app:reveal-file", 任意路径) 让系统资源管理器打开任意文件
+  const writtenFiles = new Set();
+
+  // 入参 → 可写盘的数据。png 解 base64，html 原样 utf8；
+  // 以前这段逻辑在「直接保存」和「另存为」两个分支里各抄了一遍
+  function encodeSavePayload(type, data) {
+    if (type !== "png") return String(data);
+    const base64 = String(data).replace(/^data:[^;]+;base64,/, "");
+    if (!/^[A-Za-z0-9+/=\r\n]+$/.test(base64)) {
+      throw new Error("图片数据不是合法的 base64");
+    }
+    return Buffer.from(base64, "base64");
+  }
+
+  function normalizeSavePayload(payload) {
+    if (!payload || typeof payload !== "object") return { error: "invalid-payload" };
+    const type = payload.type === "png" || payload.type === "html" ? payload.type : null;
+    if (!type) return { error: "unsupported-type" };
+    if (typeof payload.name !== "string" || !payload.name.trim()) return { error: "empty-name" };
+    if (typeof payload.data !== "string" || !payload.data) return { error: "empty-data" };
+
+    const limit = type === "png" ? LIMITS.SAVE_IMAGE_MAX_BYTES : LIMITS.SAVE_TEXT_MAX_BYTES;
+    if (payload.data.length > limit) return { error: "too-large" };
+
+    // 强制扩展名与类型一致，避免存出“图片内容 .html 后缀”这种打不开的文件
+    let name = sanitizeFileName(payload.name, type === "png" ? "配色方案.png" : "配色方案.html");
+    const wantExt = type === "png" ? ".png" : ".html";
+    if (path.extname(name).toLowerCase() !== wantExt) {
+      name = sanitizeFileName(path.basename(name, path.extname(name)) + wantExt);
+    }
+
+    return {
+      type,
+      name,
+      direct: payload.direct === true,
+      data: payload.data,
+    };
+  }
+
   ipcMain.handle("app:save-file", async (event, payload) => {
-    const { type, name, data, direct } = payload || {};
-    if (!data || !name) return { ok: false, error: "empty" };
+    // 只受理主窗口发来的保存请求（更新窗口 / 弹窗窗口的 preload 不暴露这个能力）
+    if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) {
+      return { ok: false, error: "forbidden" };
+    }
+
+    const normalized = normalizeSavePayload(payload);
+    if (normalized.error) return { ok: false, error: normalized.error };
+
+    const { type, name, direct, data } = normalized;
     const owner = BrowserWindow.fromWebContents(event.sender) || mainWin;
-    const safeName = String(name).replace(/[\\/:*?"<>|]/g, "-");
     const baseDir = type === "png" ? app.getPath("pictures") : app.getPath("documents");
-    // direct=true：不弹原生对话框，直接落到「图片 / 文档」目录（HTML 导出还在用）。
-    // 其余情况一律走系统「另存为」，让用户自己选保存位置。
-    const forceDirect = !!direct;
-    if (forceDirect) {
-      const directPath = uniqueFilePath(baseDir, safeName);
+
+    let encoded;
+    try {
+      encoded = encodeSavePayload(type, data);
+    } catch (err) {
+      return { ok: false, error: err && err.message ? err.message : String(err) };
+    }
+
+    // direct=true：不弹原生对话框，直接落到「图片 / 文档」目录（HTML 导出还在用）
+    if (direct) {
       try {
-        if (type === "png") {
-          const base64 = String(data).replace(/^data:[^;]+;base64,/, "");
-          await fs.writeFile(directPath, Buffer.from(base64, "base64"));
-        } else {
-          await fs.writeFile(directPath, String(data), "utf8");
-        }
+        const directPath = await writeFileExclusive(baseDir, name, encoded);
+        writtenFiles.add(directPath);
         return { ok: true, path: directPath };
-      } catch (e) {
-        return { ok: false, error: e && e.message ? e.message : String(e) };
+      } catch (err) {
+        return { ok: false, error: err && err.message ? err.message : String(err) };
       }
     }
+
     // 弹系统「另存为」：无边框窗口下对话框容易被主窗盖住并让主窗进入
     // 不可交互的模态状态，这里临时把主窗置顶并聚焦，保证对话框一定在最前面
     const ownerWin = owner && !owner.isDestroyed() ? owner : null;
@@ -359,7 +481,7 @@ function bindSaveIpc() {
       result = await dialog.showSaveDialog(ownerWin || undefined, {
         title: "另存为",
         buttonLabel: "保存",
-        defaultPath: path.join(baseDir, safeName),
+        defaultPath: uniqueFilePath(baseDir, name),
         filters:
           type === "png"
             ? [{ name: "PNG 图片", extensions: ["png"] }]
@@ -375,26 +497,29 @@ function bindSaveIpc() {
       }
     }
     const { canceled, filePath } = result || {};
-    if (canceled || !filePath) return { ok: false, canceled: true };
+    if (canceled || !filePath || typeof filePath !== "string") return { ok: false, canceled: true };
     try {
-      if (type === "png") {
-        const base64 = String(data).replace(/^data:[^;]+;base64,/, "");
-        await fs.writeFile(filePath, Buffer.from(base64, "base64"));
-      } else {
-        await fs.writeFile(filePath, String(data), "utf8");
-      }
+      await fs.writeFile(filePath, encoded);
+      writtenFiles.add(filePath);
       return { ok: true, path: filePath };
-    } catch (e) {
-      return { ok: false, error: e && e.message ? e.message : String(e) };
+    } catch (err) {
+      return { ok: false, error: err && err.message ? err.message : String(err) };
     }
   });
 
+
   // 保存成功后「在文件夹中显示」：只对已经存在、且由本进程写过的路径生效
-  ipcMain.handle("app:reveal-file", async (_event, filePath) => {
+  ipcMain.handle("app:reveal-file", async (event, filePath) => {
+    // 与 save-file 同样的来源校验：只有主窗口能请求
+    if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) {
+      return { ok: false, error: "forbidden" };
+    }
     try {
-      if (!filePath) return { ok: false };
-      await fs.access(String(filePath));
-      shell.showItemInFolder(String(filePath));
+      if (typeof filePath !== "string" || !filePath) return { ok: false };
+      // 白名单：必须是 save-file 真正写成功的路径，渲染进程无法借此打开任意本地文件
+      if (!writtenFiles.has(filePath)) return { ok: false, error: "not-written-by-app" };
+      await fs.access(filePath);
+      shell.showItemInFolder(filePath);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e && e.message ? e.message : String(e) };
@@ -428,7 +553,7 @@ function bindDialogIpc() {
     if (!isDialogSender(event) || !dialogWin || dialogWin.isDestroyed()) return;
     const h = Math.round(Number(height));
     if (!Number.isFinite(h) || h <= 0) return;
-    const next = Math.max(DIALOG_UI.HEIGHT, Math.min(620, h));
+    const next = Math.max(DIALOG_UI.HEIGHT, Math.min(LIMITS.DIALOG_MAX_HEIGHT, h));
     const [w] = dialogWin.getContentSize();
     if (dialogWin.getContentSize()[1] !== next) {
       try { dialogWin.setContentSize(w, next); } catch (_) {}
@@ -461,11 +586,14 @@ function showCustomDialog(options = {}) {
     };
     dialogResolve = resolve;
 
-    // 体检清单一多就会被 236px 的固定高度挤成一条，按条数长高（最多 480）
+    // 体检清单一多就会被固定高度挤成一条，按条数长高（有上限）
     const checkCount = (pendingDialogState.checks || []).length;
     const dialogHeight =
       options.height ||
-      Math.min(480, DIALOG_UI.HEIGHT + Math.max(0, checkCount - 2) * 64);
+      Math.min(
+        LIMITS.DIALOG_MAX_HEIGHT,
+        LIMITS.DIALOG_BASE_HEIGHT + Math.max(0, checkCount - 2) * LIMITS.DIALOG_HEIGHT_PER_CHECK
+      );
 
     const parent = mainWin && !mainWin.isDestroyed() ? mainWin : null;
     dialogWin = new BrowserWindow({
@@ -492,8 +620,25 @@ function showCustomDialog(options = {}) {
       },
     });
     dialogWin.removeMenu();
-    dialogWin.loadFile(DIALOG_UI.HTML);
+    lockDownWindowNavigation(dialogWin);
     const win = dialogWin;
+    // 页面缺失 / 加载失败时，ready-to-show 永远不会来，Promise 会一直挂着：
+    // 这里必须兜底 settle，否则调用方（过期弹窗、GPU 降级弹窗）永远等不到结果
+    const settleOnLoadFailure = (reason) => {
+      console.warn("[dialog] 弹窗加载失败:", reason);
+      if (dialogWin === win) {
+        dialogWin = null;
+        const cb = dialogResolve;
+        dialogResolve = null;
+        pendingDialogState = null;
+        if (cb) cb(-1);
+      }
+      if (win && !win.isDestroyed()) {
+        try { win.destroy(); } catch (_) {}
+      }
+    };
+    win.webContents.once("did-fail-load", (_e, code, desc) => settleOnLoadFailure(code + " " + desc));
+    win.loadFile(DIALOG_UI.HTML).catch((err) => settleOnLoadFailure(err && err.message));
     dialogWin.once("ready-to-show", () => {
       if (win.isDestroyed()) return;
       win.show();
@@ -525,9 +670,18 @@ const APP_VERSION = app.getVersion() || "未知版本";
 
 // 获取网络状态
 function getNetworkStatus() {
-  const interfaces = os.networkInterfaces();
+  let interfaces = {};
+  try {
+    interfaces = os.networkInterfaces() || {};
+  } catch (err) {
+    return { status: "未知", ip: "无" };
+  }
   for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
+    const list = interfaces[name];
+    // Node 文档明确说某个网卡可能是 undefined，直接 for...of 会抛 TypeError
+    if (!Array.isArray(list)) continue;
+    for (const iface of list) {
+      if (!iface) continue;
       if (iface.family === "IPv4" && !iface.internal) {
         return {
           status: "已连接",
@@ -571,9 +725,21 @@ function createWindow() {
 
   win.loadFile(CONSTANTS.INDEX_HTML);
 
-  // 页面是本地编辑器，不允许被内容导航到别处；外链统一交给系统默认浏览器打开
+  // 页面是本地编辑器，不允许被内容导航到别处；外链统一交给系统默认浏览器打开。
+  // 只放行「本应用目录内」的 file:// 页面：以前任何 file:// 都放行，
+  // 一次注入就能把渲染进程导到磁盘上任意 HTML（比如用户下载目录里被投放的页面）
+  const { fileURLToPath } = require("url");
+  const appRootPath = path.resolve(__dirname);
   win.webContents.on("will-navigate", (event, url) => {
-    if (String(url).startsWith("file://")) return; // 本地页面内部跳转放行
+    const raw = String(url || "");
+    if (/^file:\/\//i.test(raw)) {
+      try {
+        const target = path.resolve(fileURLToPath(raw));
+        if (target === appRootPath || target.indexOf(appRootPath + path.sep) === 0) return;
+      } catch (_) {
+        // 解析失败一律当作不允许
+      }
+    }
     event.preventDefault();
   });
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -710,8 +876,8 @@ const UPDATE_SOURCES = [
   },
 ];
 
-const STARTUP_CHECK_DELAY = 20 * 1000; // 启动后后台静默检查（只有发现更新才弹窗）
-const PROBE_TIMEOUT = 15 * 1000; // 单源探测超时：慢源不能拖住整体结果
+const STARTUP_CHECK_DELAY = TIMING.STARTUP_CHECK_DELAY_MS; // 启动后后台静默检查（只有发现更新才弹窗）
+const PROBE_TIMEOUT = TIMING.PROBE_TIMEOUT_MS; // 单源探测超时：慢源不能拖住整体结果
 const UPDATE_NOTES_TEXT = "解决一些已知问题"; // 更新内容统一文案（不展示远端 releaseNotes）
 const UPDATE_UI = {
   DIR: path.join(__dirname, "update-ui"),
@@ -860,7 +1026,20 @@ function openUpdateWindow() {
   });
 
   updateWin.removeMenu();
-  updateWin.loadFile(UPDATE_UI.HTML);
+  lockDownWindowNavigation(updateWin);
+  // 更新界面加载失败时 ready-to-show 不会触发，窗口就永远不显示：
+  // 这里兜底提示并回收窗口，避免用户点了“检查更新”后毫无反应
+  const failUpdateUi = (reason) => {
+    console.warn("[update] 更新界面加载失败:", reason);
+    closeUpdateWindow();
+    patchState({
+      phase: "error",
+      message: "更新界面加载失败，请稍后重试。",
+      notice: "",
+    });
+  };
+  updateWin.webContents.once("did-fail-load", (_e, code, desc) => failUpdateUi(code + " " + desc));
+  updateWin.loadFile(UPDATE_UI.HTML).catch((err) => failUpdateUi(err && err.message));
 
   updateWin.once("ready-to-show", () => {
     if (!updateWin || updateWin.isDestroyed()) return;
@@ -1086,7 +1265,13 @@ async function probeSourcesInParallel() {
   const tasks = pool.map(({ source, updater }) => {
     const label = sourceLabel(source);
     const startedAt = probeStartedAt;
-    return withTimeout(updater.checkForUpdates(), PROBE_TIMEOUT, label)
+    // checkForUpdates() 可能同步抛错（源配置非法 / updater 未激活），
+    // 直接调用会让整个 Promise.all 立刻 reject，界面停在「正在检查」再也不动
+    return withTimeout(
+      Promise.resolve().then(() => updater.checkForUpdates()),
+      PROBE_TIMEOUT,
+      label
+    )
       .then((result) => collectCandidate(source, updater, result, startedAt))
       .catch((err) => {
         resetUpdaterInstance(updater);
@@ -1140,7 +1325,8 @@ async function handleUpdateAction(action) {
       break;
 
     case "retry":
-      runUpdateCheck();
+      // runUpdateCheck 内部虽有兜底，但仍然统一接住，避免 unhandledRejection 打崩主进程
+      Promise.resolve(runUpdateCheck()).catch(() => {});
       break;
 
     case "restart-install":
@@ -1150,8 +1336,17 @@ async function handleUpdateAction(action) {
       // 必须用“真正完成下载”的那个实例，否则找不到安装包
       setTimeout(() => {
         const updater = activeUpdater || autoUpdater;
-        updater.quitAndInstall();
-      }, 60);
+        if (!updater || typeof updater.quitAndInstall !== "function") {
+          console.warn("[update] 没有可用的 updater，忽略重启安装请求");
+          return;
+        }
+        try {
+          updater.quitAndInstall();
+        } catch (err) {
+          // 安装包被删/被杀软隔离时 quitAndInstall 会抛错，这时不能把整个进程带走
+          console.error("[update] quitAndInstall 失败:", err && err.message);
+        }
+      }, TIMING.RELAUNCH_DELAY_MS);
       break;
 
     case "open-release":
@@ -1241,13 +1436,7 @@ function handleDownloadFailure(err, usedUpdater) {
     // 用户主动取消：回到“发现新版本”，不弹错误
     downloadInFlight = false;
     setAppProgressBar(null);
-    patchState({
-      phase: "available",
-      percent: 0,
-      transferred: 0,
-      total: 0,
-      notice: "已取消下载，可稍后重新下载。",
-    });
+    resetToAvailable();
     return;
   }
 
@@ -1290,6 +1479,18 @@ function pickFallbackSource(usedUpdater) {
   return null;
 }
 
+// 取消 / 失败后统一回到「发现新版本」态：三段几乎相同的 patchState 抽成一处，
+// 避免以后加字段时漏改其中一段导致各入口状态不一致
+function resetToAvailable(notice) {
+  patchState({
+    phase: "available",
+    percent: 0,
+    transferred: 0,
+    total: 0,
+    notice: notice || "已取消下载，可稍后重新下载。",
+  });
+}
+
 function cancelDownload() {
   // 演示模式的“下载”由定时器模拟，直接停表
   if (pendingUpdate && pendingUpdate.demo) {
@@ -1298,13 +1499,7 @@ function cancelDownload() {
       demoTimer = null;
     }
     setAppProgressBar(null);
-    patchState({
-      phase: "available",
-      percent: 0,
-      transferred: 0,
-      total: 0,
-      notice: "已取消下载，可稍后重新下载。",
-    });
+    resetToAvailable();
     return;
   }
 
@@ -1324,13 +1519,7 @@ function cancelDownload() {
   }
   downloadInFlight = false;
   setAppProgressBar(null);
-  patchState({
-    phase: "available",
-    percent: 0,
-    transferred: 0,
-    total: 0,
-    notice: "已取消下载，可稍后重新下载。",
-  });
+  resetToAvailable();
 }
 
 // ------------------------- 检查更新 -------------------------
@@ -1498,7 +1687,9 @@ function openUpdateCenter() {
     openUpdateWindow();
     return;
   }
-  runUpdateCheck({ silent: false });
+  Promise.resolve(runUpdateCheck({ silent: false })).catch((err) => {
+    console.error("[update] 检查更新失败:", err && err.message);
+  });
 }
 
 // ------------------------- 演示模式（本地预览界面用） -------------------------
@@ -1516,7 +1707,7 @@ function showDemoUpdate() {
     currentVersion: app.getVersion(),
     notes: UPDATE_NOTES_TEXT,
     releaseDate: new Date().toISOString(),
-    sizeBytes: 82 * 1048576,
+    sizeBytes: LIMITS.DEMO_TOTAL_BYTES,
     lastCheckAt: new Date().toISOString(),
     sourceLabel: "演示数据",
     probeMs: 168,
@@ -1529,8 +1720,8 @@ function showDemoUpdate() {
 function runDemoDownload() {
   if (demoTimer) return;
 
-  const total = 82 * 1048576;
-  const speed = 2.6 * 1048576;
+  const total = LIMITS.DEMO_TOTAL_BYTES;
+  const speed = LIMITS.DEMO_SPEED_BYTES;
   let transferred = 0;
 
   patchState({
@@ -1552,7 +1743,7 @@ function runDemoDownload() {
       demoTimer = null;
       return;
     }
-    transferred = Math.min(total, transferred + speed * 0.5);
+    transferred = Math.min(total, transferred + speed * (TIMING.DEMO_TICK_MS / 1000));
     const percent = (transferred / total) * 100;
     patchState({
       phase: "downloading",
@@ -1571,7 +1762,7 @@ function runDemoDownload() {
       patchState({ phase: "ready", version: pendingUpdate.version, percent: 100 });
       openUpdateWindow();
     }
-  }, 500);
+  }, TIMING.DEMO_TICK_MS);
 }
 
 // ------------------------- updater 事件 -------------------------
@@ -1580,7 +1771,7 @@ function onDownloadProgress(progress) {
 
   // 进度事件很密集，节流到 12 帧/秒左右，避免渲染进程被刷爆
   const now = Date.now();
-  if (now - lastProgressAt < 80) return;
+  if (now - lastProgressAt < TIMING.PROGRESS_THROTTLE_MS) return;
   lastProgressAt = now;
 
   const total = progress.total || 0;
@@ -1667,19 +1858,67 @@ function initAutoUpdater() {
 }
 
 // 启动后延时静默检查一次：只有真的有新版本时才弹窗
+let startupCheckTimer = null;
+
 function scheduleStartupCheck() {
-  setTimeout(() => {
+  if (startupCheckTimer) clearTimeout(startupCheckTimer);
+  startupCheckTimer = setTimeout(() => {
+    startupCheckTimer = null;
     runUpdateCheck({ silent: true }).catch(() => {});
   }, STARTUP_CHECK_DELAY);
+  // 不 unref 会在应用该退出时把进程多挂 20 秒；这里只影响启动检查，不需要保活
+  if (startupCheckTimer && typeof startupCheckTimer.unref === "function") startupCheckTimer.unref();
 }
 
 // ------------------------- 过期与自毁逻辑 -------------------------
+// 自毁前先做一次“目标合理性”检查：只有确认是应用自己的安装目录才允许删。
+// 这里不做任何宽泛删除，避免路径异常时把用户目录 / 盘符根目录当成安装目录
+function isSafeRemovalTarget(target) {
+  if (typeof target !== "string" || !target) return false;
+  let resolved;
+  try {
+    resolved = path.resolve(target);
+  } catch (_) {
+    return false;
+  }
+  const root = path.parse(resolved).root;
+  // 盘符根目录（C:\）、用户主目录、临时目录、系统目录一律拒绝
+  if (resolved === root) return false;
+  const norm = resolved.toLowerCase().replace(/[\\/]+$/, "");
+  if (norm === root.replace(/[\\/]+$/, "").toLowerCase()) return false;
+  const denied = [
+    (() => { try { return os.homedir(); } catch (_) { return ""; } })(),
+    (() => { try { return os.tmpdir(); } catch (_) { return ""; } })(),
+    (() => { try { return app.getPath("userData"); } catch (_) { return ""; } })(),
+  ]
+    .filter(Boolean)
+    .map((p) => path.resolve(p).toLowerCase().replace(/[\\/]+$/, ""));
+  if (denied.indexOf(norm) !== -1) return false;
+  for (const d of denied) {
+    // 是这些目录本身或其上级，都不能删
+    if (d.indexOf(norm + path.sep) === 0) return false;
+  }
+  // 至少有 2 层目录（例如 D:\app\dickson），单层目录风险太高
+  const parts = resolved.split(path.sep).filter(Boolean);
+  return parts.length >= 2;
+}
+
+// 批处理里只有 % 会被当变量展开；路径本身不会带 " （Windows 文件名不允许）
+function batchQuote(value) {
+  return '"' + String(value).replace(/%/g, "%%") + '"';
+}
+
 async function selfDestruct() {
+  const childProcess = require("child_process");
   try {
     const appPath = path.dirname(app.getPath("exe"));
     const tempDir = os.tmpdir();
     const isWindows = process.platform === "win32";
     const isMac = process.platform === "darwin";
+
+    if (!isSafeRemovalTarget(appPath)) {
+      throw new Error("安装目录校验未通过，已中止自动删除: " + appPath);
+    }
 
     // 生成临时脚本：文件名带随机后缀，避免被预放同名文件劫持
     const suffix = Math.random().toString(36).slice(2, 10);
@@ -1687,15 +1926,18 @@ async function selfDestruct() {
       ? path.join(tempDir, "cleanup-" + suffix + ".bat")
       : path.join(tempDir, "cleanup-" + suffix + (isMac ? ".command" : ".sh"));
 
+    const quotedAppPath = isWindows ? batchQuote(appPath) : '"' + appPath + '"';
+
     // Windows: 等主进程退出后重试删除，单次 rmdir 经常因为文件句柄没释放而失败
     const scriptContent = isWindows
       ? [
           "@echo off",
+          "setlocal",
           "set RETRY=0",
           ":retry",
           "timeout /t 3 /nobreak >nul",
-          `rmdir /s /q "${appPath}" 2>nul`,
-          `if exist "${appPath}" (`,
+          `rmdir /s /q ${quotedAppPath} 2>nul`,
+          `if exist ${quotedAppPath} (`,
           "  set /a RETRY+=1",
           "  if %RETRY% LSS 8 goto retry",
           ")",
@@ -1703,9 +1945,9 @@ async function selfDestruct() {
         ].join("\r\n")
       : [
           "#!/bin/bash",
-          `for i in $(seq 1 8); do`,
-          `  rm -rf "${appPath}"`,
-          `  [ ! -d "${appPath}" ] && break`,
+          "for i in $(seq 1 8); do",
+          `  rm -rf ${quotedAppPath}`,
+          `  [ ! -d ${quotedAppPath} ] && break`,
           "  sleep 1",
           "done",
           'rm -- "$0"',
@@ -1714,29 +1956,49 @@ async function selfDestruct() {
     await fs.writeFile(scriptPath, scriptContent);
     if (!isWindows) await fs.chmod(scriptPath, 0o755); // 添加执行权限
 
-    // 执行脚本
+    // 执行脚本：一律用 spawn + 参数数组，不拼 shell 字符串。
+    // 以前 `start "" cmd /c "${scriptPath}"` 这种写法，路径里只要有引号/&/^ 就会被当成命令
     if (isWindows) {
-      // start 的第一个带引号参数会被当作窗口标题，必须先给一个空标题占位，
-      // 否则脚本路径被当成标题，cmd /c 收不到参数，清理脚本根本不执行
-      require("child_process").exec(`start "" cmd /c "${scriptPath}"`, {
-        shell: true,
+      const child = childProcess.spawn("cmd.exe", ["/c", scriptPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
       });
+      // spawn 失败（找不到 cmd.exe 等）会 emit error，没有监听器就会变成未捕获异常
+      child.on("error", (err) => console.warn("[self-destruct] 清理脚本启动失败:", err && err.message));
+      child.unref();
     } else if (isMac) {
-      require("child_process").exec(`open -a Terminal "${scriptPath}"`, {
-        shell: true,
-      }); // macOS使用Terminal执行
+      const child = childProcess.spawn("open", ["-a", "Terminal", scriptPath], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.on("error", (err) => console.warn("[self-destruct] 清理脚本启动失败:", err && err.message));
+      child.unref();
     } else {
-      require("child_process").exec(`xterm -e "bash ${scriptPath}"`, {
-        shell: true,
-      }); // Linux终端执行
+      const child = childProcess.spawn("xterm", ["-e", "bash", scriptPath], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.on("error", () => {
+        // 没有 xterm 的环境：直接后台跑脚本，不阻塞退出
+        try {
+          childProcess.spawn("/bin/sh", [scriptPath], { detached: true, stdio: "ignore" }).unref();
+        } catch (_) {}
+      });
+      child.unref();
     }
   } catch (error) {
     console.error("自毁失败:", error);
-    await showCustomDialog({
-      kind: "error",
-      title: "自毁失败",
-      message: "删除应用程序时发生错误，请手动删除。",
-    });
+    try {
+      await showCustomDialog({
+        kind: "error",
+        title: "自毁失败",
+        message: "删除应用程序时发生错误，请手动删除。",
+        detail: error && error.message ? String(error.message) : "",
+      });
+    } catch (_) {
+      // 弹窗本身失败时已经无处可提示，保证进程能正常退出
+    }
   }
 }
 
@@ -1744,20 +2006,34 @@ let expiryHandled = false;
 
 function checkExpiration() {
   if (expiryHandled) return true;
-  // 过期判定交给原生模块（C++），主进程里看不到判定逻辑
-  if (native.checkExpiry() !== 1) return false;
+  // 过期判定交给原生模块（C++），主进程里看不到判定逻辑。
+  // 原生模块是外部二进制：抛错（被杀软拦截、架构不匹配）时不能连带把定时器打挂
+  let expired = false;
+  try {
+    expired = native.checkExpiry() === 1;
+  } catch (err) {
+    console.warn("[expiry] 原生模块判定失败:", err && err.message);
+    return false;
+  }
+  if (!expired) return false;
 
   expiryHandled = true;
   // 到期后主窗口必须立刻不能用：弹窗是非模态的，只靠用户点“确定”等于形同虚设
   try {
     if (mainWin && !mainWin.isDestroyed()) mainWin.setEnabled(false);
   } catch (_) {}
-  // 用户一直不理弹窗也不能一直跑：60 秒后强制清理
+  // 用户一直不理弹窗也不能一直跑：超时后强制清理
   const forceTimer = setTimeout(() => {
     selfDestruct();
     app.quit();
-  }, 60 * 1000);
+  }, TIMING.DIALOG_FORCE_EXIT_MS);
   if (forceTimer && typeof forceTimer.unref === "function") forceTimer.unref();
+
+  const finish = () => {
+    clearTimeout(forceTimer);
+    selfDestruct();
+    app.quit();
+  };
 
   showCustomDialog({
     kind: "error",
@@ -1765,11 +2041,9 @@ function checkExpiration() {
     message: "程序已超过有效期，即将自毁！",
     detail: "剩余时间：0分钟",
     buttons: [{ label: "确定", kind: "primary" }],
-  }).finally(() => {
-    clearTimeout(forceTimer);
-    selfDestruct();
-    app.quit();
-  });
+  })
+    // Promise 失败也必须走同一条收尾路径，否则过期后进程会一直挂着
+    .then(finish, finish);
   return true;
 }
 
@@ -1791,7 +2065,9 @@ function bindDownloadGuard() {
   try {
     session.defaultSession.on("will-download", (_event, item) => {
       try {
-        const name = String(item.getFilename() || "download");
+        // 文件名来自服务端 Content-Disposition，可能带 ../ 之类的路径片段，
+        // 必须先净化再拼目录，否则能把文件写到「图片/文档」目录之外
+        const name = sanitizeFileName(item.getFilename() || "download", "download");
         const dir = /\.(png|jpg|jpeg|webp|bmp)$/i.test(name)
           ? app.getPath("pictures")
           : app.getPath("documents");
@@ -1805,28 +2081,71 @@ function bindDownloadGuard() {
   }
 }
 
+// 弹窗 / 更新窗口也持有 preload 暴露的 IPC：禁止它们自行跳转或开新窗口，
+// 否则一次误点的链接就能把本地 UI 换成远端页面，拿着同一套 IPC 权限调用主进程
+function lockDownWindowNavigation(win) {
+  if (!win || win.isDestroyed() || !win.webContents) return;
+  win.webContents.on("will-navigate", (event) => event.preventDefault());
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+}
+
+// 会话级安全策略：渲染进程一律无授权（本应用不需要摄像头/麦克风/定位/通知/剪贴板读取）
+function hardenSession() {
+  try {
+    const ses = session.defaultSession;
+    ses.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    if (typeof ses.setPermissionCheckHandler === "function") {
+      ses.setPermissionCheckHandler(() => false);
+    }
+  } catch (err) {
+    console.warn("[security] 权限策略设置失败:", err && err.message);
+  }
+}
+
 // ------------------------- 应用生命周期 -------------------------
-app.whenReady().then(() => {
-  if (checkExpiration()) return;
-  bindSaveIpc(); // 保存图片 / 保存 HTML 的原生另存为通道
-  bindDownloadGuard(); // 下载兜底：不再弹 Windows「另存为」
-  startExpiryWatch(); // 运行中也要定期复查到期时间
-  initAutoUpdater();
-  createWindow();
-  scheduleStartupCheck(); // 启动后后台静默检查一次，有新版才弹窗
+app.whenReady()
+  .then(() => {
+    hardenSession(); // 先收紧会话权限，再创建任何窗口
+    if (checkExpiration()) return;
+    bindSaveIpc(); // 保存图片 / 保存 HTML 的原生另存为通道
+    bindDownloadGuard(); // 下载兜底：不再弹 Windows「另存为」
+    startExpiryWatch(); // 运行中也要定期复查到期时间
+    initAutoUpdater();
+    createWindow();
+    scheduleStartupCheck(); // 启动后后台静默检查一次，有新版才弹窗
 
-  app.on("activate", () => {
-    if (!mainWin || mainWin.isDestroyed()) createWindow();
+    app.on("activate", () => {
+      if (!mainWin || mainWin.isDestroyed()) createWindow();
+    });
+
+    // 处理第二个实例启动：用保存的主窗口引用，不会误把更新窗口拉到前台
+    app.on("second-instance", () => {
+      const win = mainWin;
+      if (!win || win.isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    });
+  })
+  .catch((err) => {
+    // 初始化失败不要在用户面前静默退出：至少落到日志 + 一个可读的提示
+    console.error("[startup] 初始化失败:", err);
+    try {
+      dialog.showErrorBox("启动失败", (err && err.message) || String(err));
+    } catch (_) {}
+    app.quit();
   });
 
-  // 处理第二个实例启动：用保存的主窗口引用，不会误把更新窗口拉到前台
-  app.on("second-instance", () => {
-    const win = mainWin;
-    if (!win || win.isDestroyed()) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-  });
+// 退出前统一清理定时器：演示下载用的是 setInterval，不会自己停
+app.on("before-quit", () => {
+  if (demoTimer) {
+    clearInterval(demoTimer);
+    demoTimer = null;
+  }
+  if (startupCheckTimer) {
+    clearTimeout(startupCheckTimer);
+    startupCheckTimer = null;
+  }
 });
 
 app.on("window-all-closed", () => {

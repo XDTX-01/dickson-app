@@ -74,11 +74,21 @@ try {
     abort('manifest.json 解析失败');
 }
 
-const expectedFiles = (manifest && manifest.files) || {};
+const expectedFiles = manifest && manifest.files;
+// 清单必须是“相对路径 → sha256”的普通对象：数组、null、字符串都不能直接当清单用
+if (!expectedFiles || typeof expectedFiles !== 'object' || Array.isArray(expectedFiles)) {
+    abort('manifest.json 结构不正确');
+}
 const entries = Object.keys(expectedFiles);
 if (entries.length === 0) abort('manifest.json 未登记任何文件');
 
 for (const rel of entries) {
+    // 相对路径校验：清单里不允许绝对路径 / ../，否则可以把校验目标指到应用目录之外
+    if (typeof rel !== 'string' || rel.indexOf('\0') !== -1) abort('非法文件名: ' + rel);
+    if (path.isAbsolute(rel) || rel.split(/[\\/]/).indexOf('..') !== -1) {
+        abort('清单包含越界路径: ' + rel);
+    }
+
     const expected = String(expectedFiles[rel] || '');
     if (!expected) abort('校验清单内容为空: ' + rel);
 
@@ -97,8 +107,18 @@ for (const rel of entries) {
 }
 
 // 以 asar 根目录作为模块 __dirname 编译执行，保证 main.js 内的相对路径（src/、package.json）正确
-const code = fs.readFileSync(appPath, 'utf8');
+let code = null;
+try {
+    code = fs.readFileSync(appPath, 'utf8');
+} catch (err) {
+    abort('读取 app.js 失败: ' + (err && err.message));
+}
 const mod = new Module('protected-main', null);
 mod.filename = path.join(__dirname, 'app.js');
 mod.paths = Module._nodeModulePaths(__dirname);
-mod._compile(code, mod.filename);
+try {
+    mod._compile(code, mod.filename);
+} catch (err) {
+    // 混淆产物自身语法/初始化异常时给出可诊断信息，而不是一个没有窗口的进程
+    abort('app.js 执行失败: ' + (err && err.message ? err.message : String(err)));
+}
