@@ -3,7 +3,9 @@
     {
       "target_name": "protect",
       "sources": ["protect.cc"],
-      "include_dirs": ["<!(node -p \"require('node-addon-api').include\")"],
+      "include_dirs": [
+        "<(module_root_dir)/../node_modules/node-addon-api"
+      ],
       "defines": ["NAPI_CPP_EXCEPTIONS"],
       "cflags!": ["-fno-exceptions"],
       "cflags_cc!": ["-fno-exceptions"],
@@ -14,7 +16,10 @@
             "msvs_settings": {
               "VCCLCompilerTool": {
                 "ExceptionHandling": "1",
-                "AdditionalOptions": ["/EHsc"]
+                "AdditionalOptions": [
+                  "/EHsc",
+                  "/I$(ProjectDir)..\\..\\node_modules\\node-addon-api"
+                ]
               }
             }
           }
