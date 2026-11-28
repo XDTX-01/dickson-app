@@ -5,6 +5,11 @@ build-protect/
 protect/build/
 protect/*.node
 
+# 前端构建产物里的派生副本：.gz 是静态托管的预压缩版，桌面端不需要；
+# *.map 只在开发排查用，打安装包前必须剔除（package.json 的 build.files 已经排除它们）
+src/**/*.gz
+src/**/*.map
+
 # 本地发布脚本用到的 GitHub Token（绝不要提交）
 token.txt
 *.token
