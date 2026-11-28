@@ -10,6 +10,13 @@ function mutate(text, from, to) {
     return text.replace(from, to);
 }
 
+// 用正则做变异：不依赖缩进宽度、空行、行尾空白——这些只跟编辑器/换行设置有关，
+// 跟“断言是否有效”无关。之前用固定缩进字符串匹配，在 CRLF/重排过的文件上会误报。
+function mutateRe(text, pattern, to) {
+    assert(pattern.test(text), '变异目标不存在: ' + pattern);
+    return text.replace(pattern, to);
+}
+
 function forbiddenHit(text, argv) {
     const seg = text.split('function hitForbiddenSwitch(argv) {')[1];
     assert(seg, '抽不到 hitForbiddenSwitch');
@@ -24,15 +31,15 @@ function forbiddenHit(text, argv) {
 test('变异：从黑名单里删掉 --inspect → 同一个判定函数就拦不住了', () => {
     const original = read('bootstrap.js');
     assert(forbiddenHit(original, ['app.exe', '--inspect']) === '--inspect', '基线应命中');
-    const broken = mutate(original, "    '--inspect',\n", '');
+    const broken = mutateRe(original, /^\s*'--inspect',\n/m, '');
     assert(forbiddenHit(broken, ['app.exe', '--inspect']) === '', '变异后仍命中说明清单没被用上');
 });
 
 test('变异：把原生模块自校验改成 native.verifyBuffer → 静态审计立刻失败', () => {
     const original = read('bootstrap.js');
-    assert(/crypto\s*\.createHash\('sha256'\)/.test(original), '基线应通过');
-    const broken = mutate(original, "crypto\n            .createHash('sha256')", "native.verifyBuffer(Buffer.from('x'),");
-    assert(!/crypto\s*\.createHash\('sha256'\)/.test(broken), '变异后不应再出现 crypto 自校验');
+    assert(/crypto\s*\.\s*createHash\('sha256'\)/.test(original), '基线应通过');
+    const broken = mutateRe(original, /crypto\s*\.\s*createHash\('sha256'\)/, "native.verifyBuffer(Buffer.from('x')");
+    assert(!/crypto\s*\.\s*createHash\('sha256'\)/.test(broken), '变异后不应再出现 crypto 自校验');
 });
 
 test('变异：去掉失败删包 → 静态审计的 unlink 断言失败', () => {

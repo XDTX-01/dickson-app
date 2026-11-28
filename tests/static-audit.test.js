@@ -16,7 +16,8 @@ test('bootstrap：调试开关黑名单覆盖 inspect / remote-debugging / js-fl
     for (const sw of ['--inspect', '--inspect-brk', '--remote-debugging-port', '--remote-debugging-pipe', '--js-flags']) {
         assert(bootstrap.indexOf("'" + sw + "'") !== -1, '黑名单缺少 ' + sw);
     }
-    const count = (bootstrap.match(/^    '--/gm) || []).length;
+    // 只数“以 -- 开头的清单项”，不绑定缩进宽度（2/4 空格、tab 都算）
+    const count = (bootstrap.match(/^\s+'--/gm) || []).length;
     assert(count >= 10, '黑名单条目过少: ' + count);
 });
 

@@ -7,7 +7,9 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 
 function read(rel) {
-    return fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    // 统一换行：Windows 上 git core.autocrlf=true 会把文件检出成 CRLF，
+    // 而 CI 又在 windows-2022 上跑——不归一化的话，所有带 \n 的字符串断言都会莫名其妙失败
+    return fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 }
 
 // 抽 [startMarker, endMarker) 之间的代码；标记找不到直接抛错（避免静默抽到空字符串后“全都通过”）
