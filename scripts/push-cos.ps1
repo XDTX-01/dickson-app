@@ -51,17 +51,22 @@ if ($Coscli) {
 }
 
 # coscli 靠配置文件拿密钥，写临时配置，脚本结束即删
+# 注意三个硬性细节（实测 coscli v1.0.9）：
+#   1) yaml 键名是全小写无下划线的 secretid / secretkey，写成 secret_id 会报 "secretID is missing"
+#   2) 临时配置不会被自动发现，必须每个命令都带 -c 显式指定（没有 COSCLI_CONFIG 这种环境变量）
+#   3) 用桶名而不是桶别名访问时，必须带 -e cos.<region>.myqcloud.com，否则报 "endpoint is missing"
 $cfgPath = Join-Path $env:TEMP ("cos-" + [guid]::NewGuid().ToString("N") + ".config.yaml")
 if (-not $DryRun) {
     @"
 cos:
   base:
-    secret_id: $KeyId
-    secret_key: $KeySecret
+    secretid: $KeyId
+    secretkey: $KeySecret
     protocol: https
 "@ | Set-Content -LiteralPath $cfgPath -Encoding utf8
-    $env:COSCLI_CONFIG = $cfgPath
 }
+$Endpoint = "cos.$Region.myqcloud.com"
+$CosArgs = @("-c", $cfgPath, "-e", $Endpoint)
 
 function Get-Sha256([string] $File) {
     return (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -102,13 +107,13 @@ foreach ($item in $plan) {
 
     $meta = "Cache-Control:$($item.Cache)"
     # coscli 的 cp 没有 --force 开关（传了会直接 unknown flag 退出），同名对象默认覆盖
-    & $Coscli cp $item.File $remote --meta $meta
+    & $Coscli cp $item.File $remote @CosArgs --meta $meta
     if ($LASTEXITCODE -ne 0) { throw "上传失败：$($item.Name)" }
 
     # 回读比对：下载回来算哈希，和本地一致才算这次上传真的成功
     $tmp = Join-Path $env:TEMP ("verify-" + [guid]::NewGuid().ToString("N") + "-" + $item.Name)
     try {
-        & $Coscli cp $remote $tmp
+        & $Coscli cp $remote $tmp @CosArgs
         if ($LASTEXITCODE -ne 0) { throw "回读失败：$($item.Name)" }
         $remoteHash = Get-Sha256 $tmp
         if ($remoteHash -ne $hash) {
@@ -125,8 +130,8 @@ if (-not $DryRun) {
     $tmpYml = Join-Path $env:TEMP ("cosyml-" + [guid]::NewGuid().ToString("N") + ".yml")
     $tmpSig = Join-Path $env:TEMP ("cosyml-" + [guid]::NewGuid().ToString("N") + ".sig")
     try {
-        & $Coscli cp "$CosBase/latest.yml" $tmpYml
-        & $Coscli cp "$CosBase/latest.yml.sig" $tmpSig
+        & $Coscli cp "$CosBase/latest.yml" $tmpYml @CosArgs
+        & $Coscli cp "$CosBase/latest.yml.sig" $tmpSig @CosArgs
         if ($LASTEXITCODE -ne 0) { throw "线上清单回读失败" }
         node (Join-Path (Split-Path -Parent $PSCommandPath) "verify-update-sig.js") --yml $tmpYml --sig $tmpSig --pub $Pub
         if ($LASTEXITCODE -ne 0) { throw "线上清单验签失败" }
@@ -139,5 +144,4 @@ if (-not $DryRun) {
 
 if (-not $DryRun -and (Test-Path -LiteralPath $cfgPath)) {
     Remove-Item -LiteralPath $cfgPath -Force
-    Remove-Item Env:\COSCLI_CONFIG -ErrorAction SilentlyContinue
 }
