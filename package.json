@@ -1,6 +1,6 @@
 {
   "name": "dickson-color-studio",
-  "version": "1.0.9",
+  "version": "1.0.1",
   "description": "Little Deng Student",
   "main": "bootstrap.js",
   "scripts": {
