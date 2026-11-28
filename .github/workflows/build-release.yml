@@ -57,6 +57,11 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      # 加固链路的回归测试全部跑在纯 Node 上（自带一次性密钥与本地 HTTP 服务），
+      # 不依赖 electron / native / 真机密钥。这一步红就等于加固被改坏了，直接停发布
+      - name: 运行加固回归测试
+        run: npm test
+
       - name: 编译 C++ 原生保护模块（L3）
         run: npm run build:native
 
@@ -130,6 +135,49 @@ jobs:
           Remove-Item -Force -ErrorAction SilentlyContinue ./main.js
           npm run package
 
+      # fuses 全靠配置写进 exe，写错不会报错、包照样能跑，所以必须读回来验证
+      - name: 校验 exe 内的 fuse 线
+        shell: pwsh
+        run: node scripts/check-fuses.js
+
+      # 给 latest.yml 签名（私钥只在 Secrets 里，从不落到仓库或磁盘 artifacts）
+      - name: 签名更新清单 latest.yml
+        shell: pwsh
+        env:
+          UPDATE_SIGN_KEY: ${{ secrets.UPDATE_SIGN_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace("$env:UPDATE_SIGN_KEY")) {
+            throw "缺少 UPDATE_SIGN_KEY，开了验签却签不出来，客户端会拒绝所有更新"
+          }
+          node scripts/sign-update.js --yml dist/latest.yml
+
+      - name: 验签自检（清单 + 签名 + 版本）
+        shell: pwsh
+        env:
+          VER: ${{ steps.set_info.outputs.VER }}
+        run: node scripts/verify-update-sig.js --yml dist/latest.yml --sig dist/latest.yml.sig --expect-version "$env:VER"
+
+      - name: 上传到腾讯云 COS（generic 更新源）
+        shell: pwsh
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_BUCKET: ${{ secrets.COS_BUCKET }}
+          COS_REGION: ${{ secrets.COS_REGION }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bucket = "$env:COS_BUCKET"; if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = "dickson-app-1313952720" }
+          $region = "$env:COS_REGION"; if ([string]::IsNullOrWhiteSpace($region)) { $region = "ap-guangzhou" }
+
+          # coscli 固定版本，避免上游行为变化把发布流程搞挂
+          $coscli = "coscli.exe"
+          if (-not (Test-Path $coscli)) {
+            Invoke-WebRequest -Uri "https://github.com/tencentyun/coscli/releases/download/v1.0.9/coscli-v1.0.9-windows-amd64.exe" -OutFile $coscli
+          }
+          Get-Item $coscli | Select-Object Name, Length
+
+          pwsh -NoProfile -File scripts/push-cos.ps1 -Dist dist -Bucket $bucket -Region $region -Prefix app-update -Coscli $coscli
+
       - name: 创建 Release 并上传产物
         uses: softprops/action-gh-release@v2
         with:
@@ -140,4 +188,5 @@ jobs:
             dist/*.exe
             dist/*.exe.blockmap
             dist/latest.yml
+            dist/latest.yml.sig
           fail_on_unmatched_files: true
