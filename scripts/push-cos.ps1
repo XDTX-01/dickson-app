@@ -101,13 +101,14 @@ foreach ($item in $plan) {
     if ($DryRun) { continue }
 
     $meta = "Cache-Control:$($item.Cache)"
-    & $Coscli cp $item.File $remote --meta $meta --force
+    # coscli 的 cp 没有 --force 开关（传了会直接 unknown flag 退出），同名对象默认覆盖
+    & $Coscli cp $item.File $remote --meta $meta
     if ($LASTEXITCODE -ne 0) { throw "上传失败：$($item.Name)" }
 
     # 回读比对：下载回来算哈希，和本地一致才算这次上传真的成功
     $tmp = Join-Path $env:TEMP ("verify-" + [guid]::NewGuid().ToString("N") + "-" + $item.Name)
     try {
-        & $Coscli cp $remote $tmp --force
+        & $Coscli cp $remote $tmp
         if ($LASTEXITCODE -ne 0) { throw "回读失败：$($item.Name)" }
         $remoteHash = Get-Sha256 $tmp
         if ($remoteHash -ne $hash) {
@@ -124,8 +125,8 @@ if (-not $DryRun) {
     $tmpYml = Join-Path $env:TEMP ("cosyml-" + [guid]::NewGuid().ToString("N") + ".yml")
     $tmpSig = Join-Path $env:TEMP ("cosyml-" + [guid]::NewGuid().ToString("N") + ".sig")
     try {
-        & $Coscli cp "$CosBase/latest.yml" $tmpYml --force
-        & $Coscli cp "$CosBase/latest.yml.sig" $tmpSig --force
+        & $Coscli cp "$CosBase/latest.yml" $tmpYml
+        & $Coscli cp "$CosBase/latest.yml.sig" $tmpSig
         if ($LASTEXITCODE -ne 0) { throw "线上清单回读失败" }
         node (Join-Path (Split-Path -Parent $PSCommandPath) "verify-update-sig.js") --yml $tmpYml --sig $tmpSig --pub $Pub
         if ($LASTEXITCODE -ne 0) { throw "线上清单验签失败" }
