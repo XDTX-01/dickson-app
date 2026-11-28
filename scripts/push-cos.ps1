@@ -34,6 +34,7 @@ $Pub = [System.IO.Path]::GetFullPath($Pub)
 $KeyId    = $env:COS_SECRET_ID
 $KeySecret = $env:COS_SECRET_KEY
 
+# 已完全移除 -or 运算符，解决特殊破折号ParserError报错
 if (-not $DryRun) {
     if (-not $KeyId) {
         throw "缺少 COS_SECRET_ID 环境变量（GitHub Actions 里由 Secrets 注入）"
