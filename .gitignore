@@ -14,6 +14,12 @@ src/**/*.map
 token.txt
 *.token
 
+# 签名私钥与签发的授权：泄露 = 谁都能给自己签一份永久授权，且无法止血
+# 唯一私钥只在开发者机器上生成并离线备份（U 盘 / 密码管理器），CI 里走 Secrets 的 UPDATE_SIGN_KEY
+license-key.json
+license.json
+*.sig.tmp
+
 # 编辑器 / 系统
 .vscode/
 .idea/
