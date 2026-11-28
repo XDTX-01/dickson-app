@@ -177,10 +177,14 @@ test('授权：license.json 带 BOM 时按无效处理（JSON.parse 失败 → n
     }
 });
 
-test('授权：verify-pub.json 出厂结构正确（空公钥 + requireLicense=false）', () => {
+test('授权：verify-pub.json 结构合法（公钥要么空、要么 32 字节）', () => {
     const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'protect', 'verify-pub.json'), 'utf8'));
     eq(cfg.alg, 'ed25519', 'alg');
-    eq(cfg.license, '', 'license 公钥出厂为空');
-    eq(cfg.update, '', 'update 公钥出厂为空');
-    eq(cfg.requireLicense, false, 'requireLicense 出厂为 false');
+    eq(typeof cfg.requireLicense, 'boolean', 'requireLicense 必须是布尔值');
+    for (const field of ['license', 'update']) {
+        const raw = Buffer.from(String(cfg[field] || ''), 'base64');
+        // 出厂允许为空（还没跑 licgen init），但一旦写了就必须是 32 字节的 Ed25519 公钥，
+        // 否则验签侧会拿着一个形状不对的 key 一直失败（CI 上就踩过这个：报"公钥不是 32 字节"）
+        assert(raw.length === 0 || raw.length === 32, field + ' 公钥长度必须是 0 或 32，实际 ' + raw.length);
+    }
 });
