@@ -157,6 +157,21 @@ jobs:
           VER: ${{ steps.set_info.outputs.VER }}
         run: node scripts/verify-update-sig.js --yml dist/latest.yml --sig dist/latest.yml.sig --expect-version "$env:VER"
 
+      - name: 创建 Release 并上传产物
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.set_info.outputs.TAG }}
+          name: ${{ steps.set_info.outputs.TITLE }}
+          body: "版本 ${{ steps.set_info.outputs.TAG }}，由 A 仓库自动同步触发构建"
+          files: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+            dist/latest.yml.sig
+          fail_on_unmatched_files: true
+
+      # 放在最后一步：Release 先落地（产物有备份），再往 COS 传更新源。
+      # 顺序反过来时，Runner 到国内 COS 一旦限速/断连，整个发布全红，连安装包都拿不到。
       - name: 上传到腾讯云 COS（generic 更新源）
         shell: pwsh
         env:
@@ -177,16 +192,3 @@ jobs:
           Get-Item $coscli | Select-Object Name, Length
 
           pwsh -NoProfile -File scripts/push-cos.ps1 -Dist dist -Bucket $bucket -Region $region -Prefix app-update -Coscli $coscli
-
-      - name: 创建 Release 并上传产物
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.set_info.outputs.TAG }}
-          name: ${{ steps.set_info.outputs.TITLE }}
-          body: "版本 ${{ steps.set_info.outputs.TAG }}，由 A 仓库自动同步触发构建"
-          files: |
-            dist/*.exe
-            dist/*.exe.blockmap
-            dist/latest.yml
-            dist/latest.yml.sig
-          fail_on_unmatched_files: true
