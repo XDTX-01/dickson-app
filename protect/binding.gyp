@@ -13,6 +13,7 @@
         [
           "OS==\"win\"",
           {
+            "libraries": ["advapi32.lib"],
             "msvs_settings": {
               "VCCLCompilerTool": {
                 "ExceptionHandling": "1",

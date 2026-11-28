@@ -5,9 +5,18 @@
   "main": "bootstrap.js",
   "scripts": {
     "start": "electron .",
-    "package": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && electron-builder --win --x64 --publish never",
+    "test": "node tests/run.js",
     "build:native": "node-gyp rebuild --directory=protect",
-    "protect": "node scripts/protect.js"
+    "protect": "node scripts/protect.js",
+    "package": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && electron-builder --win --x64 --publish never",
+    "sign:update": "node scripts/sign-update.js --yml dist/latest.yml",
+    "verify:update": "node scripts/verify-update-sig.js --yml dist/latest.yml --sig dist/latest.yml.sig",
+    "push:cos": "pwsh -NoProfile -File scripts/push-cos.ps1 -Dist dist -Bucket dickson-app-1313952720 -Region ap-guangzhou -Prefix app-update",
+    "lic:init": "node scripts/licgen.js init",
+    "lic:mid": "node scripts/licgen.js mid",
+    "lic:issue": "node scripts/licgen.js issue",
+    "lic:verify": "node scripts/licgen.js verify",
+    "release": "npm run protect && npm run package && npm run sign:update && npm run verify:update"
   },
   "author": "Little Deng Student",
   "license": "MIT",
@@ -26,6 +35,15 @@
       "**/*.node"
     ],
     "compression": "maximum",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "loadBrowserProcessSpecificV8Snapshot": false
+    },
     "files": [
       "build-protect/**/*",
       "protect/**/*",

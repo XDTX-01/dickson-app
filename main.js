@@ -10,6 +10,7 @@ const {
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto"); // 更新清单/授权验签（Ed25519）
 const fs = require("fs/promises"); // 使用Promise版本的fs
 // 原生保护模块：过期判定、文件完整性自检（C++ 编译，无明文逻辑）
 // 本地开发（无编译产物）时降级为桩函数，保证 npm start 可直接跑；生产环境加载真实模块
@@ -40,12 +41,20 @@ let native = null;
 try {
   native = require("./protect/protect.node");
 } catch (_) {
-  // 开发模式（未打包）用的桩：只覆盖主进程真正会用到的 4 个方法。
+  // 开发模式（未打包）用的桩：覆盖主进程会用到的全部方法。
   // 以后原生模块新增 API 时，桩里没有就会被调成 undefined is not a function——所以这里打一次警告
   console.warn("[native] 未加载 protect.node，过期判定/完整性自检降级为桩函数（仅开发模式）");
+  const coreSeed = `dev-${Date.now()}-${Math.random()}`;
   native = {
+    openCore: () => coreSeed,
+    isCoreOpen: () => true,
+    hostCheck: () => ({ ok: true, reason: "", debugger: false, fuse: "" }),
+    checkTamper: () => ({ ok: true, debugger: false, reason: "" }),
     checkExpiry: () => 0, // 开发模式：永不过期
     expireAt: () => 0, // 0 = 没有到期时间，菜单里不显示倒计时
+    applyLicense: () => true,
+    hasLicense: () => false,
+    machineId: () => "dev-machine",
     verifyFile: () => true,
     verifyBuffer: () => true,
   };
@@ -1051,7 +1060,208 @@ const UPDATE_UI = {
   HEIGHT: 402,
 };
 
-// electron-updater 没有直接导出取消令牌，取自它的依赖 builder-util-runtime
+// ------------------------- 更新清单验签（latest.yml + latest.yml.sig） -------------------------
+// 为什么需要：electron-updater 只校验它自己下载的 sha512，而那份 sha512 来自 latest.yml；
+// latest.yml 本身没有任何保护，谁能在源上换掉它，就能让客户端装任意安装包。
+// 这里用 Ed25519 给 latest.yml 签名，客户端只认“签名对得上、哈希对得上”的包。
+const UPDATE_SIGN_CONFIG_PATH = path.join(__dirname, "protect", "verify-pub.json");
+let updateSignPubKey = null;
+try {
+  const cfg = JSON.parse(fsSync.readFileSync(UPDATE_SIGN_CONFIG_PATH, "utf8"));
+  const raw = Buffer.from(String((cfg && cfg.update) || ""), "base64");
+  if (raw.length === 32) {
+    updateSignPubKey = crypto.createPublicKey({
+      key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
+      format: "jwk",
+    });
+  }
+} catch (_) {
+  updateSignPubKey = null;
+}
+
+const SIGNED_MANIFEST_TIMEOUT = 15 * 1000;
+const signedManifestCache = new Map(); // sourceKey -> { version, files: [{name, sha512}], path, sha512, at }
+
+function signedManifestUrls(source) {
+  if (!source) return null;
+  if (source.provider === "generic" && source.url) {
+    const base = String(source.url).replace(/\/+$/, "") + "/";
+    return { yml: base + "latest.yml", sig: base + "latest.yml.sig" };
+  }
+  if (source.provider === "github" && source.owner && source.repo) {
+    const base =
+      "https://github.com/" + source.owner + "/" + source.repo + "/releases/latest/download/";
+    return { yml: base + "latest.yml", sig: base + "latest.yml.sig" };
+  }
+  return null;
+}
+
+async function fetchText(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || SIGNED_MANIFEST_TIMEOUT);
+  try {
+    const res = await fetch(url, { signal: controller.signal, redirect: "follow" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// latest.yml 结构由 electron-builder 生成，字段固定，用行级解析足够稳；
+// 解析失败一律当“清单无效”，不做任何宽松兜底。
+function parseLatestYml(text) {
+  const out = { version: "", path: "", sha512: "", files: [] };
+  if (typeof text !== "string" || !text) return out;
+  // BOM 会让 ^version 之类的行首匹配全部落空（Windows 下手写/另存的文件常见）
+  text = text.replace(/^\uFEFF/, "");
+
+  const v = text.match(/^version:\s*['"]?([^'"\r\n]+)/m);
+  if (v) out.version = v[1].trim();
+
+  const p = text.match(/^path:\s*['"]?([^'"\r\n]+)/m);
+  if (p) out.path = p[1].trim();
+
+  const filesBlock = text.split(/^files\s*:\s*$/m)[1];
+  if (filesBlock) {
+    // 只取到下一个顶层键（顶格、非空白开头）为止
+    const section = filesBlock.split(/\n(?=[^\s-])/)[0];
+    const re = /url:\s*['"]?([^'"\r\n]+)[\r\n]+[\s\S]*?sha512:\s*['"]?([A-Za-z0-9+/=]+)/g;
+    let m = null;
+    while ((m = re.exec(section)) !== null) {
+      out.files.push({ name: m[1].trim(), sha512: m[2].trim() });
+    }
+  }
+
+  // 顶层 sha512（对应 path 指向的安装包）
+  const top = text.match(/\nsha512:\s*['"]?([A-Za-z0-9+/=]{40,})/);
+  if (top) out.sha512 = top[1].trim();
+
+  return out;
+}
+
+async function fetchSignedManifest(source) {
+  if (!updateSignPubKey) return null;
+  const key = sourceKey(source);
+  const urls = signedManifestUrls(source);
+  if (!key || !urls) return null;
+
+  const [ymlRes, sigRes] = await Promise.allSettled([
+    fetchText(urls.yml),
+    fetchText(urls.sig),
+  ]);
+  if (ymlRes.status !== "fulfilled" || sigRes.status !== "fulfilled") {
+    writeCrashLog("update-sign", key + " 清单或签名下载失败");
+    return null;
+  }
+
+  const ymlText = ymlRes.value;
+  let sigBuf = null;
+  try {
+    sigBuf = Buffer.from(sigRes.value.trim(), "base64");
+  } catch (_) {
+    sigBuf = null;
+  }
+  if (!sigBuf || sigBuf.length !== 64) {
+    writeCrashLog("update-sign", key + " 签名格式不合法");
+    return null;
+  }
+
+  let ok = false;
+  try {
+    ok = crypto.verify(null, Buffer.from(ymlText, "utf8"), updateSignPubKey, sigBuf);
+  } catch (_) {
+    ok = false;
+  }
+  if (!ok) {
+    writeCrashLog("update-sign", key + " latest.yml 签名校验失败（可能被替换）");
+    return null;
+  }
+
+  const parsed = parseLatestYml(ymlText);
+  if (!parsed.version || (!parsed.sha512 && parsed.files.length === 0)) {
+    writeCrashLog("update-sign", key + " 清单内容不完整");
+    return null;
+  }
+
+  const entry = {
+    version: parsed.version,
+    files: parsed.files,
+    path: parsed.path,
+    sha512: parsed.sha512,
+    at: Date.now(),
+  };
+  signedManifestCache.set(key, entry);
+  return entry;
+}
+
+function fileSha512Base64(file) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha512");
+    const stream = fsSync.createReadStream(file);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("base64")));
+  });
+}
+
+// 校验已下载的安装包：
+//   1) 该源必须有验签通过的清单（没有 = 失败，不允许安装）
+//   2) 清单版本要和本次下载的版本一致
+//   3) 本地文件的 sha512 必须等于清单里登记的值
+async function verifyDownloadedInstaller(info) {
+  if (!updateSignPubKey) {
+    return { ok: true, skipped: true };
+  }
+
+  const source = activeSource;
+  const key = sourceKey(source);
+  if (!key) return { ok: false, reason: "无法确定更新源" };
+
+  let manifest = signedManifestCache.get(key) || null;
+  if (!manifest) {
+    try {
+      manifest = await fetchSignedManifest(source);
+    } catch (_) {
+      manifest = null;
+    }
+  }
+  if (!manifest) return { ok: false, reason: "没有可验证的更新清单（latest.yml.sig）" };
+
+  const version = String((info && info.version) || (pendingUpdate && pendingUpdate.version) || "");
+  if (version && manifest.version && version !== manifest.version) {
+    return { ok: false, reason: "清单版本不一致（" + manifest.version + " ≠ " + version + "）" };
+  }
+
+  const file = info && info.path ? String(info.path) : "";
+  if (!file) return { ok: false, reason: "下载结果里没有文件路径" };
+
+  let actual = "";
+  try {
+    actual = await fileSha512Base64(file);
+  } catch (err) {
+    return { ok: false, reason: "读取安装包失败: " + ((err && err.message) || String(err)) };
+  }
+
+  const baseName = path.basename(file);
+  let expected = "";
+  for (const f of manifest.files) {
+    if (f && f.name === baseName) {
+      expected = f.sha512;
+      break;
+    }
+  }
+  if (!expected && manifest.path === baseName) expected = manifest.sha512;
+  if (!expected && manifest.files.length === 1) expected = manifest.files[0].sha512;
+  if (!expected) return { ok: false, reason: "清单里没有登记这个安装包: " + baseName };
+
+  if (expected !== actual) {
+    return { ok: false, reason: "安装包哈希与签名清单不符" };
+  }
+  return { ok: true };
+}
+
+// ------------------------- updater 实例池（并发的基础） -------------------------
 let CancellationToken = null;
 try {
   CancellationToken = require("builder-util-runtime").CancellationToken || null;
@@ -1352,7 +1562,7 @@ function sourceKey(source) {
   return String(source.provider || "") + ":" + String(source.url || "");
 }
 
-// ------------------------- updater 实例池（并发的基础） -------------------------
+// ------------------------- updater 事件绑定 -------------------------
 function bindUpdaterEvents(updater) {
   if (!updater || boundUpdaters.has(updater)) return;
   boundUpdaters.add(updater);
@@ -2044,7 +2254,7 @@ function onDownloadProgress(progress) {
   setAppProgressBar(Math.min(1, Math.max(0, percent / 100)));
 }
 
-function onUpdateDownloaded(info) {
+async function onUpdateDownloaded(info) {
   stopDownloadWatchdog();
   downloadInFlight = false;
   // 用户点了取消之后，底层可能仍然把最后一段下完并抛 update-downloaded：
@@ -2055,6 +2265,37 @@ function onUpdateDownloaded(info) {
     resetToAvailable();
     return;
   }
+
+  // 先验后给“就绪”：签名清单 / 版本 / 哈希三重对上才算下载成功。
+  // 验不过就删包 + 走失败流程（可能换源重下），绝不让未经校验的安装包留在磁盘上，
+  // 更不能走到“重启安装”——那一步会把恶意包直接装进系统。
+  let verdict = { ok: true, skipped: true };
+  try {
+    verdict = await verifyDownloadedInstaller(info);
+  } catch (err) {
+    verdict = { ok: false, reason: (err && err.message) || String(err) };
+  }
+
+  if (!verdict || !verdict.ok) {
+    const reason = (verdict && verdict.reason) || "校验未通过";
+    writeCrashLog("update-verify", "安装包拒绝安装：" + reason);
+    const file = info && info.path ? String(info.path) : "";
+    if (file) {
+      try {
+        await fs.unlink(file);
+      } catch (_) {
+        // 删不掉也要继续走失败流程，不能因为一个残留文件卡在这里
+      }
+    }
+    lastDownloadError = "更新包校验失败：" + reason;
+    handleDownloadFailure(new Error(lastDownloadError), activeUpdater);
+    return;
+  }
+
+  handleDownloadedVerified(info);
+}
+
+function handleDownloadedVerified(info) {
   readyUpdate = info || {};
   setAppProgressBar(null);
   patchState({
@@ -2384,6 +2625,90 @@ function startExpiryWatch() {
   if (typeof timer.unref === "function") timer.unref();
 }
 
+// ------------------------- 运行期自检（原生会话 / DevTools / 逆向检测） -------------------------
+// bootstrap 已经做过一次宿主与 fuse 校验，但那是“启动那一刻”。运行中 exe 被替换、
+// 或者有人用浏览器协议连上调试端口，都得能发现。
+const TAMPER_CHECK_INTERVAL = 60 * 1000;
+const TAMPER_STRIKES = 2; // 连续命中两次才动手：避免杀软/输入法注入造成误杀
+let tamperStrikes = 0;
+let tamperTimer = null;
+let tamperHandled = false;
+
+// 原生会话在这次改版里是“一次性”的：openCore 成功后才能调敏感导出。
+// 主进程若拿不到会话，说明 native 被换成了桩或被提前加载过，直接按篡改处理。
+function ensureNativeCore() {
+  try {
+    if (typeof native.isCoreOpen === "function" && native.isCoreOpen()) {
+      return true;
+    }
+  } catch (_) {}
+  writeCrashLog("native-session", "原生会话未建立");
+  return false;
+}
+
+function closeStrayDevTools() {
+  try {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win || win.isDestroyed() || !win.webContents) continue;
+      if (win.webContents.isDevToolsOpened()) win.webContents.closeDevTools();
+    }
+  } catch (_) {}
+}
+
+function checkRuntimeTamper() {
+  if (tamperHandled) return false;
+
+  let hit = false;
+  let reason = "";
+  try {
+    const res = native.checkTamper();
+    if (res && res.ok === false) {
+      hit = true;
+      reason = String((res && res.reason) || "tamper");
+    }
+  } catch (err) {
+    // 原生模块抛错（被替换/被杀软摘除）本身就是异常状态
+    hit = true;
+    reason = "native-error:" + ((err && err.message) || "unknown");
+  }
+
+  // DevTools 的出现也是“有人在看内部”的强信号，单独统计，不并进 native 判定
+  try {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win && !win.isDestroyed() && win.webContents && win.webContents.isDevToolsOpened()) {
+        hit = true;
+        reason = reason || "devtools";
+        win.webContents.closeDevTools();
+      }
+    }
+  } catch (_) {}
+
+  if (!hit) {
+    tamperStrikes = 0;
+    return false;
+  }
+
+  tamperStrikes += 1;
+  writeCrashLog("tamper", "第 " + tamperStrikes + " 次命中: " + reason);
+  if (tamperStrikes < TAMPER_STRIKES) return false;
+
+  tamperHandled = true;
+  Promise.resolve()
+    .then(() => selfDestruct())
+    .catch(() => {})
+    .then(() => app.quit());
+  return true;
+}
+
+function startTamperWatch() {
+  if (tamperTimer) return;
+  tamperTimer = setInterval(() => {
+    checkRuntimeTamper();
+    closeStrayDevTools();
+  }, TAMPER_CHECK_INTERVAL);
+  if (typeof tamperTimer.unref === "function") tamperTimer.unref();
+}
+
 // ------------------------- 下载兜底（彻底去掉「另存为」） -------------------------
 // 只要有渲染进程退回 a[download]（浏览器下载语义），Chromium 就会弹 Windows「另存为」。
 // 这里把下载事件接管掉，按类型静默写到「图片 / 文档」目录，永远不弹系统对话框。
@@ -2445,12 +2770,24 @@ app.whenReady()
       }
     }
     hardenSession(); // 先收紧会话权限，再创建任何窗口
+    // 原生会话必须在这里仍然有效：bootstrap 拿到会话后，任何人抢在前面把 native 换掉，
+    // isCoreOpen() 就会变 false。这一步失败说明运行环境不可信，直接退出（不做自毁，
+    // 避免把“杀软拦截 native”的误判升级成删文件）
+    if (!ensureNativeCore()) {
+      try {
+        dialog.showErrorBox("无法启动", "运行环境校验失败，请重新安装。");
+      } catch (_) {}
+      app.quit();
+      return;
+    }
     if (checkExpiration()) return;
     bindSaveIpc(); // 保存图片 / 保存 HTML 的原生另存为通道
     bindDownloadGuard(); // 下载兜底：不再弹 Windows「另存为」
     startExpiryWatch(); // 运行中也要定期复查到期时间
+    startTamperWatch(); // 运行中复核调试器/DevTools/native 会话
     initAutoUpdater();
     createWindow();
+    closeStrayDevTools();
     scheduleStartupCheck(); // 启动后后台静默检查一次，有新版才弹窗
 
     app.on("activate", () => {
@@ -2487,6 +2824,10 @@ app.on("before-quit", () => {
   if (startupCheckTimer) {
     clearTimeout(startupCheckTimer);
     startupCheckTimer = null;
+  }
+  if (tamperTimer) {
+    clearInterval(tamperTimer);
+    tamperTimer = null;
   }
   stopDownloadWatchdog();
 });
