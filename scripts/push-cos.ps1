@@ -35,8 +35,11 @@ $KeyId    = $env:COS_SECRET_ID
 $KeySecret = $env:COS_SECRET_KEY
 
 if (-not $DryRun) {
-    if (-not $KeyId -or -not $KeySecret) {
-        throw "缺少 COS_SECRET_ID / COS_SECRET_KEY 环境变量（GitHub Actions 里由 Secrets 注入）"
+    if (-not $KeyId) {
+        throw "缺少 COS_SECRET_ID 环境变量（GitHub Actions 里由 Secrets 注入）"
+    }
+    if (-not $KeySecret) {
+        throw "缺少 COS_SECRET_KEY 环境变量（GitHub Actions 里由 Secrets 注入）"
     }
 }
 
